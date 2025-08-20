@@ -1,0 +1,4 @@
+#ifndef OPENCV_STREAM_HPP
+#define OPENCV_STREAM_HPP
+
+#endif //OPENCV_STREAM_HPP

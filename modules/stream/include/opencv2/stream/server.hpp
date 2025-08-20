@@ -1,0 +1,4 @@
+#ifndef OPENCV_SERVER_HPP
+#define OPENCV_SERVER_HPP
+
+#endif //OPENCV_SERVER_HPP
