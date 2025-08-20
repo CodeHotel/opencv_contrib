@@ -1,5 +1,5 @@
 #include <iostream>
-
+/*
 // libmicrohttpd
 #include <microhttpd.h>
 
@@ -27,9 +27,9 @@ static enum MHD_Result answer_to_connection(void *cls,
     MHD_destroy_response(response);
 
     return ret;
-}
+}*/
 
-int main() {
+int main() {/*
     struct MHD_Daemon *daemon;
     daemon = MHD_start_daemon(MHD_USE_INTERNAL_POLLING_THREAD,
                               8888,                // 포트
@@ -51,6 +51,7 @@ int main() {
     std::cout << "Press Enter to stop the server..." << std::endl;
     getchar();
 
-    MHD_stop_daemon(daemon);
+    MHD_stop_daemon(daemon);*/
+    std::cout << "Press Enter to stop the server..." << std::endl;
     return 0;
 }

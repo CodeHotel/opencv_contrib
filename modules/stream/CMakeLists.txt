@@ -28,10 +28,7 @@ macro(stream_find_backend _name _cmake_name _pkgconfig_name _header_name _lib_na
     if(STREAM_${_name}_DIR)
         set(${_name}_HINTS HINTS "${STREAM_${_name}_DIR}")
     endif()
-
     set(_found_in_macro FALSE)
-
-    # Priority 1: Try native CMake find_package()
     if(NOT _found_in_macro AND NOT "${_cmake_name}" STREQUAL "")
         find_package(${_cmake_name} QUIET ${${_name}_HINTS})
         if(${_cmake_name}_FOUND)
@@ -41,8 +38,6 @@ macro(stream_find_backend _name _cmake_name _pkgconfig_name _header_name _lib_na
             set(_found_in_macro TRUE)
         endif()
     endif()
-
-    # Priority 2: Try pkg-config
     if(NOT _found_in_macro AND NOT "${_pkgconfig_name}" STREQUAL "")
         ocv_check_modules(OCV_TEMP_${_name} ${_pkgconfig_name} QUIET)
         if(OCV_TEMP_${_name}_FOUND)
@@ -52,16 +47,13 @@ macro(stream_find_backend _name _cmake_name _pkgconfig_name _header_name _lib_na
             set(_found_in_macro TRUE)
         endif()
     endif()
-
-    # Priority 3: Try manual path/library search
     if(NOT _found_in_macro AND NOT "${_header_name}" STREQUAL "")
         find_path(${_name}_INCLUDE_DIR NAMES ${_header_name} ${${_name}_HINTS})
         if(NOT "${_lib_name}" STREQUAL "")
             find_library(${_name}_LIBRARY NAMES ${_lib_name} ${${_name}_HINTS})
-        else() # For header-only libs
+        else()
             set(${_name}_LIBRARY TRUE)
         endif()
-
         if(${_name}_INCLUDE_DIR AND ${_name}_LIBRARY)
             set(${_name}_FOUND TRUE)
             set(${_name}_INCLUDE_DIRS "${${_name}_INCLUDE_DIR}")
@@ -158,20 +150,16 @@ elseif(STREAM_SELECTED_BACKEND STREQUAL "MONGOOSE")
     set(MONGOOSE_VERSION "7.18")
     set(MONGOOSE_HASH "e50fe3c2d43cdd5ed96833aae88ad7b1")
     set(MONGOOSE_URL "https://github.com/cesanta/mongoose/archive/refs/tags/${MONGOOSE_VERSION}.zip")
-
     set(MONGOOSE_DOWNLOAD_DIR "${OpenCV_BINARY_DIR}/3rdparty/mongoose")
     set(MONGOOSE_UNPACK_DIR "${MONGOOSE_DOWNLOAD_DIR}/mongoose-${MONGOOSE_VERSION}")
-
     set(STREAM_BACKEND_SOURCES "${MONGOOSE_UNPACK_DIR}/mongoose.c")
     set(STREAM_BACKEND_INCLUDES "${MONGOOSE_UNPACK_DIR}")
-
-    # CORRECTED: Use only the arguments supported by the ocv_download function.
     ocv_download(
             FILENAME "${MONGOOSE_VERSION}.zip"
             URL "${MONGOOSE_URL}"
             HASH "${MONGOOSE_HASH}"
             DESTINATION_DIR "${MONGOOSE_DOWNLOAD_DIR}"
-            UNPACK # This is a boolean flag to trigger extraction
+            UNPACK
     )
 endif()
 
@@ -179,15 +167,22 @@ set(STREAM_BACKEND_DEFINITIONS "HAVE_STREAM_BACKEND_${STREAM_SELECTED_BACKEND}")
 message(STATUS "OpenCV Stream: Using '${STREAM_SELECTED_BACKEND}' backend.")
 
 # --- Define the module and its dependencies ---
-ocv_define_module(stream opencv_core
-        SOURCES ${STREAM_BACKEND_SOURCES}
-        PRIVATE_DEFINITIONS ${STREAM_BACKEND_DEFINITIONS}
-)
+ocv_define_module(stream opencv_core)
 
+# Add the downloaded mongoose.c file to the sources if it was selected.
+if(STREAM_SELECTED_BACKEND STREQUAL "MONGOOSE")
+    target_sources(${the_module} PRIVATE ${STREAM_BACKEND_SOURCES})
+endif()
+
+# Add the HAVE_STREAM_BACKEND_... definition for use in C++ #ifdefs.
+target_compile_definitions(${the_module} PRIVATE ${STREAM_BACKEND_DEFINITIONS})
+
+# Add any necessary include directories for the selected backend.
 if(STREAM_BACKEND_INCLUDES)
     target_include_directories(${the_module} PRIVATE ${STREAM_BACKEND_INCLUDES})
 endif()
 
+# Link against the backend libraries and FFmpeg.
 ocv_target_link_libraries(${the_module} PRIVATE
         ${FFMPEG_LIBRARIES}
         ${STREAM_BACKEND_LIBS}
@@ -195,7 +190,10 @@ ocv_target_link_libraries(${the_module} PRIVATE
 
 # --- Define the test executable ---
 if(BUILD_TESTS)
-    add_executable(test_stream test/test_stream.cpp ${STREAM_BACKEND_SOURCES})
+    add_executable(test_stream test/test_stream.cpp)
+    if(STREAM_SELECTED_BACKEND STREQUAL "MONGOOSE")
+        target_sources(test_stream PRIVATE ${STREAM_BACKEND_SOURCES})
+    endif()
     if(STREAM_BACKEND_INCLUDES)
         target_include_directories(test_stream PRIVATE ${STREAM_BACKEND_INCLUDES})
     endif()
