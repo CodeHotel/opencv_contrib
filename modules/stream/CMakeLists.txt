@@ -1,25 +1,37 @@
+# OpenCV Stream module — CMake configuration
 #
-# CMakeLists.txt for the OpenCV Stream module
+# Exposed CMake cache variables:
+#   WITH_STREAM (BOOL)                                   [ON]
+#       Enable/disable building this module.
+#
+#   STREAM_BACKEND (STRING: AUTO|CIVETWEB|BOOST|MONGOOSE) [AUTO]
+#       Backend selection. AUTO tries CIVETWEB → BOOST → MONGOOSE.
+#
+#   STREAM_CIVETWEB_DIR (PATH)                           [""]
+#       Hint path to a custom CivetWeb installation root.
+#
+#   STREAM_BOOST_DIR (PATH)                              [""]
+#       Hint path to a custom Boost installation root (headers/libs).
+#
+#   STREAM_COMPRESSION (STRING: AUTO|ON|OFF)             [AUTO]
+#       Enables FFmpeg-based compression when available.
+#         - AUTO : YES if FFmpeg is found, otherwise NO
+#         - ON   : YES if FFmpeg is found, otherwise NO (and a post-config warning)
+#         - OFF  : NO
 #
 
 set(the_description "OpenCV Stream Module: Real-time streaming API for live video/image feeds")
 
-# Main switch to enable/disable the module
+# Module toggle
 ocv_option(WITH_STREAM "Build OpenCV stream module" ON)
 if(NOT WITH_STREAM)
     ocv_module_disable(stream)
     return()
 endif()
 
-# --- Check for hard dependency: FFmpeg ---
-ocv_check_modules(FFMPEG libavcodec libavformat libavutil libswscale)
-if(NOT FFMPEG_FOUND)
-    message(STATUS "Disabling stream module: FFmpeg libraries are required.")
-    ocv_module_disable(stream)
-    return()
-endif()
-
-# --- Unified Backend Search Macro ---
+# ------------------------------------------------------------------------------
+# Backend discovery helper
+# ------------------------------------------------------------------------------
 macro(stream_find_backend _name _cmake_name _pkgconfig_name _header_name _lib_name)
     set(${_name}_FOUND FALSE)
     set(${_name}_INCLUDE_DIRS "")
@@ -67,91 +79,83 @@ macro(stream_find_backend _name _cmake_name _pkgconfig_name _header_name _lib_na
     endif()
 endmacro()
 
-# --- Expose manual path options and proactively check for all backends ---
-set(STREAM_ASIO_DIR "" CACHE PATH "Path to a custom Asio installation root")
-set(STREAM_CIVETWEB_DIR "" CACHE PATH "Path to a custom Civetweb installation root")
-set(STREAM_MICROHTTPD_DIR "" CACHE PATH "Path to a custom microhttpd installation root")
+# ------------------------------------------------------------------------------
+# Options & discovery (quiet)
+# ------------------------------------------------------------------------------
+set(STREAM_CIVETWEB_DIR "" CACHE PATH "Path to a custom CivetWeb installation root")
+set(STREAM_BOOST_DIR    "" CACHE PATH "Path to a custom Boost installation root (headers or libs)")
 
-message(STATUS "Stream: Checking for available backends...")
-stream_find_backend(ASIO Asio "" asio.hpp "")
+# Backends
 stream_find_backend(CIVETWEB civetweb civetweb civetweb.h civetweb)
-stream_find_backend(MICROHTTPD "" libmicrohttpd microhttpd.h microhttpd)
+stream_find_backend(BOOST    Boost    ""        "boost/beast/core.hpp" "boost_system")
 
-if(ASIO_FOUND)
-    message(STATUS "  - Asio:        YES")
-else()
-    message(STATUS "  - Asio:        NO")
-endif()
-if(CIVETWEB_FOUND)
-    message(STATUS "  - Civetweb:    YES")
-else()
-    message(STATUS "  - Civetweb:    NO")
-endif()
-if(MICROHTTPD_FOUND)
-    message(STATUS "  - microhttpd:  YES")
-else()
-    message(STATUS "  - microhttpd:  NO")
-endif()
+# Compression (FFmpeg) — optional
+set(STREAM_COMPRESSION "AUTO" CACHE STRING "Enable compression via FFmpeg (AUTO, ON, OFF)")
+set_property(CACHE STREAM_COMPRESSION PROPERTY STRINGS AUTO ON OFF)
+string(TOUPPER "${STREAM_COMPRESSION}" STREAM_COMPRESSION)
 
+# Discover FFmpeg quietly; never disables the module
+ocv_check_modules(FFMPEG libavcodec libavformat libavutil libswscale QUIET)
 
-# --- Configure the HTTP backend ---
-set(STREAM_BACKEND "AUTO" CACHE STRING "HTTP backend for stream module (AUTO, ASIO, CIVETWEB, MICROHTTPD, MONGOOSE)")
-if(NOT STREAM_BACKEND)
-    set(STREAM_BACKEND "AUTO")
-endif()
+# ------------------------------------------------------------------------------
+# Backend selection
+# ------------------------------------------------------------------------------
+set(STREAM_BACKEND "AUTO" CACHE STRING "HTTP backend for stream module (AUTO, CIVETWEB, BOOST, MONGOOSE)")
+set_property(CACHE STREAM_BACKEND PROPERTY STRINGS AUTO CIVETWEB BOOST MONGOOSE)
 string(TOUPPER "${STREAM_BACKEND}" STREAM_BACKEND)
-message(STATUS "Stream: User backend preference: ${STREAM_BACKEND}")
 
 set(STREAM_SELECTED_BACKEND "")
 set(STREAM_BACKEND_SOURCES "")
 set(STREAM_BACKEND_INCLUDES "")
 set(STREAM_BACKEND_LIBS "")
+set(STREAM_POST_WARNINGS "")
 
-# 1. Logic to select backend and set final variables
+# Honor explicit choice when available (defer warnings)
 if(NOT STREAM_BACKEND STREQUAL "AUTO")
-    if(STREAM_BACKEND STREQUAL "ASIO" AND ASIO_FOUND)
-        set(STREAM_SELECTED_BACKEND "ASIO")
-    elseif(STREAM_BACKEND STREQUAL "CIVETWEB" AND CIVETWEB_FOUND)
+    if(STREAM_BACKEND STREQUAL "CIVETWEB" AND CIVETWEB_FOUND)
         set(STREAM_SELECTED_BACKEND "CIVETWEB")
-    elseif(STREAM_BACKEND STREQUAL "MICROHTTPD" AND MICROHTTPD_FOUND)
-        set(STREAM_SELECTED_BACKEND "MICROHTTPD")
+    elseif(STREAM_BACKEND STREQUAL "BOOST" AND BOOST_FOUND)
+        set(STREAM_SELECTED_BACKEND "BOOST")
     elseif(STREAM_BACKEND STREQUAL "MONGOOSE")
         set(STREAM_SELECTED_BACKEND "MONGOOSE")
     else()
         if(NOT STREAM_BACKEND STREQUAL "MONGOOSE")
-            message(WARNING "Stream: Invalid or not-found backend '${STREAM_BACKEND}' specified. Using automatic detection.")
+            list(APPEND STREAM_POST_WARNINGS
+                    "Stream: Requested backend '${STREAM_BACKEND}' not found; falling back to AUTO.")
         endif()
     endif()
 endif()
 
+# AUTO fallback chain
 if(STREAM_SELECTED_BACKEND STREQUAL "")
-    if(ASIO_FOUND)
-        set(STREAM_SELECTED_BACKEND "ASIO")
-    elseif(CIVETWEB_FOUND)
+    if(CIVETWEB_FOUND)
         set(STREAM_SELECTED_BACKEND "CIVETWEB")
-    elseif(MICROHTTPD_FOUND)
-        set(STREAM_SELECTED_BACKEND "MICROHTTPD")
+    elseif(BOOST_FOUND)
+        set(STREAM_SELECTED_BACKEND "BOOST")
     else()
         set(STREAM_SELECTED_BACKEND "MONGOOSE")
     endif()
 endif()
 
-# Set the final variables based on the selected backend
-if(STREAM_SELECTED_BACKEND STREQUAL "ASIO")
-    set(STREAM_BACKEND_INCLUDES ${ASIO_INCLUDE_DIRS})
-    set(STREAM_BACKEND_LIBS ${ASIO_LIBRARIES})
-elseif(STREAM_SELECTED_BACKEND STREQUAL "CIVETWEB")
+# Backend-specific wiring
+if(STREAM_SELECTED_BACKEND STREQUAL "CIVETWEB")
     set(STREAM_BACKEND_INCLUDES ${CIVETWEB_INCLUDE_DIRS})
-    set(STREAM_BACKEND_LIBS ${CIVETWEB_LIBRARIES})
-elseif(STREAM_SELECTED_BACKEND STREQUAL "MICROHTTPD")
-    set(STREAM_BACKEND_INCLUDES ${MICROHTTPD_INCLUDE_DIRS})
-    set(STREAM_BACKEND_LIBS ${MICROHTTPD_LIBRARIES})
+    set(STREAM_BACKEND_LIBS     ${CIVETWEB_LIBRARIES})
+
+elseif(STREAM_SELECTED_BACKEND STREQUAL "BOOST")
+    set(STREAM_BACKEND_INCLUDES ${BOOST_INCLUDE_DIRS})
+    set(STREAM_BACKEND_LIBS     ${BOOST_LIBRARIES})
+    find_package(Threads QUIET)
+    if(Threads_FOUND)
+        list(APPEND STREAM_BACKEND_LIBS Threads::Threads)
+    endif()
+
 elseif(STREAM_SELECTED_BACKEND STREQUAL "MONGOOSE")
     set(MONGOOSE_VERSION "7.18")
     set(MONGOOSE_HASH "e50fe3c2d43cdd5ed96833aae88ad7b1")
     set(MONGOOSE_URL "https://github.com/cesanta/mongoose/archive/refs/tags/${MONGOOSE_VERSION}.zip")
     set(MONGOOSE_DOWNLOAD_DIR "${OpenCV_BINARY_DIR}/3rdparty/mongoose")
-    set(MONGOOSE_UNPACK_DIR "${MONGOOSE_DOWNLOAD_DIR}/mongoose-${MONGOOSE_VERSION}")
+    set(MONGOOSE_UNPACK_DIR   "${MONGOOSE_DOWNLOAD_DIR}/mongoose-${MONGOOSE_VERSION}")
     set(STREAM_BACKEND_SOURCES "${MONGOOSE_UNPACK_DIR}/mongoose.c")
     set(STREAM_BACKEND_INCLUDES "${MONGOOSE_UNPACK_DIR}")
     ocv_download(
@@ -163,32 +167,53 @@ elseif(STREAM_SELECTED_BACKEND STREQUAL "MONGOOSE")
     )
 endif()
 
-set(STREAM_BACKEND_DEFINITIONS "HAVE_STREAM_BACKEND_${STREAM_SELECTED_BACKEND}")
-message(STATUS "OpenCV Stream: Using '${STREAM_SELECTED_BACKEND}' backend.")
+# ------------------------------------------------------------------------------
+# Compression decision (FFmpeg optional)
+# ------------------------------------------------------------------------------
+set(STREAM_COMPRESSION_ENABLED FALSE)
+if(STREAM_COMPRESSION STREQUAL "ON")
+    if(FFMPEG_FOUND)
+        set(STREAM_COMPRESSION_ENABLED TRUE)
+    else()
+        list(APPEND STREAM_POST_WARNINGS
+                "Stream: STREAM_COMPRESSION=ON but FFmpeg not found; disabling compression.")
+    endif()
+elseif(STREAM_COMPRESSION STREQUAL "AUTO")
+    if(FFMPEG_FOUND)
+        set(STREAM_COMPRESSION_ENABLED TRUE)
+    endif()
+else() # OFF: keep FALSE
+endif()
 
-# --- Define the module and its dependencies ---
+# ------------------------------------------------------------------------------
+# Targets
+# ------------------------------------------------------------------------------
+set(STREAM_BACKEND_DEFINITIONS "HAVE_STREAM_BACKEND_${STREAM_SELECTED_BACKEND}")
+if(STREAM_COMPRESSION_ENABLED)
+    list(APPEND STREAM_BACKEND_DEFINITIONS "HAVE_STREAM_COMPRESSION")
+endif()
+
 ocv_define_module(stream opencv_core)
 
-# Add the downloaded mongoose.c file to the sources if it was selected.
+# Add vendored source if using Mongoose
 if(STREAM_SELECTED_BACKEND STREQUAL "MONGOOSE")
     target_sources(${the_module} PRIVATE ${STREAM_BACKEND_SOURCES})
 endif()
 
-# Add the HAVE_STREAM_BACKEND_... definition for use in C++ #ifdefs.
+# Definitions & includes
 target_compile_definitions(${the_module} PRIVATE ${STREAM_BACKEND_DEFINITIONS})
-
-# Add any necessary include directories for the selected backend.
 if(STREAM_BACKEND_INCLUDES)
     target_include_directories(${the_module} PRIVATE ${STREAM_BACKEND_INCLUDES})
 endif()
 
-# Link against the backend libraries and FFmpeg.
-ocv_target_link_libraries(${the_module} PRIVATE
-        ${FFMPEG_LIBRARIES}
-        ${STREAM_BACKEND_LIBS}
-)
+# Link libraries (backend + optional FFmpeg)
+set(_stream_module_libs ${STREAM_BACKEND_LIBS})
+if(STREAM_COMPRESSION_ENABLED)
+    list(APPEND _stream_module_libs ${FFMPEG_LIBRARIES})
+endif()
+ocv_target_link_libraries(${the_module} PRIVATE ${_stream_module_libs})
 
-# --- Define the test executable ---
+# Tests
 if(BUILD_TESTS)
     add_executable(test_stream test/test_stream.cpp)
     if(STREAM_SELECTED_BACKEND STREQUAL "MONGOOSE")
@@ -197,9 +222,42 @@ if(BUILD_TESTS)
     if(STREAM_BACKEND_INCLUDES)
         target_include_directories(test_stream PRIVATE ${STREAM_BACKEND_INCLUDES})
     endif()
-    target_link_libraries(test_stream PRIVATE
-            ${the_module}
-            ${FFMPEG_LIBRARIES}
-            ${STREAM_BACKEND_LIBS}
-    )
+    set(_stream_test_libs ${the_module} ${STREAM_BACKEND_LIBS})
+    if(STREAM_COMPRESSION_ENABLED)
+        list(APPEND _stream_test_libs ${FFMPEG_LIBRARIES})
+    endif()
+    target_link_libraries(test_stream PRIVATE ${_stream_test_libs})
 endif()
+
+# ------------------------------------------------------------------------------
+# Summary (printed once; warnings deferred until after the summary)
+# ------------------------------------------------------------------------------
+set(_yn_CIVETWEB "NO")
+set(_yn_BOOST    "NO")
+set(_yn_FFMPEG   "NO")
+set(_yn_COMP     "NO")
+if(CIVETWEB_FOUND)
+    set(_yn_CIVETWEB "YES")
+endif()
+if(BOOST_FOUND)
+    set(_yn_BOOST    "YES")
+endif()
+if(FFMPEG_FOUND)
+    set(_yn_FFMPEG   "YES")
+endif()
+if(STREAM_COMPRESSION_ENABLED)
+    set(_yn_COMP "YES")
+endif()
+
+message(STATUS "\n\
+Stream configuration summary:\n\
+  Backend preference       : ${STREAM_BACKEND}\n\
+  Backend selected         : ${STREAM_SELECTED_BACKEND}\n\
+  CivetWeb found           : ${_yn_CIVETWEB}\n\
+  Boost (Beast) found      : ${_yn_BOOST}\n\
+  FFmpeg found             : ${_yn_FFMPEG}\n\
+  Compression (FFmpeg)     : ${_yn_COMP}\n")
+
+foreach(_w IN LISTS STREAM_POST_WARNINGS)
+    message(WARNING "${_w}")
+endforeach()
