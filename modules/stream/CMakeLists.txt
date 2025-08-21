@@ -30,64 +30,94 @@ if(NOT WITH_STREAM)
 endif()
 
 # ------------------------------------------------------------------------------
-# Backend discovery helper
-# ------------------------------------------------------------------------------
-macro(stream_find_backend _name _cmake_name _pkgconfig_name _header_name _lib_name)
-    set(${_name}_FOUND FALSE)
-    set(${_name}_INCLUDE_DIRS "")
-    set(${_name}_LIBRARIES "")
-    set(${_name}_HINTS "")
-    if(STREAM_${_name}_DIR)
-        set(${_name}_HINTS HINTS "${STREAM_${_name}_DIR}")
-    endif()
-    set(_found_in_macro FALSE)
-    if(NOT _found_in_macro AND NOT "${_cmake_name}" STREQUAL "")
-        find_package(${_cmake_name} QUIET ${${_name}_HINTS})
-        if(${_cmake_name}_FOUND)
-            set(${_name}_FOUND TRUE)
-            set(${_name}_INCLUDE_DIRS "${${_cmake_name}_INCLUDE_DIRS}")
-            set(${_name}_LIBRARIES "${${_cmake_name}_LIBRARIES}")
-            set(_found_in_macro TRUE)
-        endif()
-    endif()
-    if(NOT _found_in_macro AND NOT "${_pkgconfig_name}" STREQUAL "")
-        ocv_check_modules(OCV_TEMP_${_name} ${_pkgconfig_name} QUIET)
-        if(OCV_TEMP_${_name}_FOUND)
-            set(${_name}_FOUND TRUE)
-            set(${_name}_INCLUDE_DIRS "${OCV_TEMP_${_name}_INCLUDE_DIRS}")
-            set(${_name}_LIBRARIES "${OCV_TEMP_${_name}_LIBRARIES}")
-            set(_found_in_macro TRUE)
-        endif()
-    endif()
-    if(NOT _found_in_macro AND NOT "${_header_name}" STREQUAL "")
-        find_path(${_name}_INCLUDE_DIR NAMES ${_header_name} ${${_name}_HINTS})
-        if(NOT "${_lib_name}" STREQUAL "")
-            find_library(${_name}_LIBRARY NAMES ${_lib_name} ${${_name}_HINTS})
-        else()
-            set(${_name}_LIBRARY TRUE)
-        endif()
-        if(${_name}_INCLUDE_DIR AND ${_name}_LIBRARY)
-            set(${_name}_FOUND TRUE)
-            set(${_name}_INCLUDE_DIRS "${${_name}_INCLUDE_DIR}")
-            if("${${_name}_LIBRARY}" STREQUAL "TRUE")
-                set(${_name}_LIBRARIES "")
-            else()
-                set(${_name}_LIBRARIES "${${_name}_LIBRARY}")
-            endif()
-            set(_found_in_macro TRUE)
-        endif()
-    endif()
-endmacro()
-
-# ------------------------------------------------------------------------------
-# Options & discovery (quiet)
-# ------------------------------------------------------------------------------
-set(STREAM_CIVETWEB_DIR "" CACHE PATH "Path to a custom CivetWeb installation root")
-set(STREAM_BOOST_DIR    "" CACHE PATH "Path to a custom Boost installation root (headers or libs)")
-
 # Backends
-stream_find_backend(CIVETWEB civetweb civetweb civetweb.h civetweb)
-stream_find_backend(BOOST    Boost    ""        "boost/beast/core.hpp" "boost_system")
+# ------------------------------------------------------------------------------
+
+# --- CivetWeb ---
+# Try pkg-config first, then plain find_* as fallback. Supports optional C++ wrapper.
+set(CIVETWEB_FOUND FALSE)
+set(CIVETWEB_INCLUDE_DIRS "")
+set(CIVETWEB_LIBRARIES "")
+
+find_package(PkgConfig QUIET)
+if(PKG_CONFIG_FOUND)
+    pkg_check_modules(PC_CIVETWEB     QUIET civetweb)
+    pkg_check_modules(PC_CIVETWEB_CPP QUIET civetweb-cpp) # optional
+endif()
+
+# Includes
+if(PC_CIVETWEB_FOUND)
+    list(APPEND CIVETWEB_INCLUDE_DIRS ${PC_CIVETWEB_INCLUDE_DIRS})
+elseif(STREAM_CIVETWEB_DIR)
+    find_path(CIVETWEB_INCLUDE_DIR NAMES civetweb.h HINTS ${STREAM_CIVETWEB_DIR})
+    if(CIVETWEB_INCLUDE_DIR)
+        list(APPEND CIVETWEB_INCLUDE_DIRS ${CIVETWEB_INCLUDE_DIR})
+    endif()
+else()
+    find_path(CIVETWEB_INCLUDE_DIR NAMES civetweb.h)
+    if(CIVETWEB_INCLUDE_DIR)
+        list(APPEND CIVETWEB_INCLUDE_DIRS ${CIVETWEB_INCLUDE_DIR})
+    endif()
+endif()
+
+# Libraries (C core required; C++ wrapper optional)
+if(PC_CIVETWEB_FOUND)
+    list(APPEND CIVETWEB_LIBRARIES ${PC_CIVETWEB_LIBRARIES})
+else()
+    if(STREAM_CIVETWEB_DIR)
+        find_library(CIVETWEB_C_LIB   NAMES civetweb     HINTS ${STREAM_CIVETWEB_DIR})
+        find_library(CIVETWEB_CPP_LIB NAMES civetweb-cpp HINTS ${STREAM_CIVETWEB_DIR})
+    else()
+        find_library(CIVETWEB_C_LIB   NAMES civetweb)
+        find_library(CIVETWEB_CPP_LIB NAMES civetweb-cpp)
+    endif()
+    if(CIVETWEB_C_LIB)
+        list(APPEND CIVETWEB_LIBRARIES ${CIVETWEB_C_LIB})
+    endif()
+    if(CIVETWEB_CPP_LIB)
+        list(APPEND CIVETWEB_LIBRARIES ${CIVETWEB_CPP_LIB})
+    endif()
+endif()
+
+if(CIVETWEB_INCLUDE_DIRS AND CIVETWEB_LIBRARIES)
+    set(CIVETWEB_FOUND TRUE)
+endif()
+
+# --- Boost (Beast) ---
+# Do NOT call find_package(Boost); CMake >=3.30 removed FindBoost (CMP0167).
+# Detect headers + (optionally) boost_system. If boost_system is missing,
+# we’ll use header-only Boost.System later via a compile definition.
+set(BOOST_FOUND FALSE)
+set(BOOST_INCLUDE_DIRS "")
+set(BOOST_LIBRARIES "")
+
+if(STREAM_BOOST_DIR)
+    find_path(BOOST_INCLUDE_DIR NAMES boost/beast/core.hpp HINTS ${STREAM_BOOST_DIR})
+else()
+    find_path(BOOST_INCLUDE_DIR NAMES boost/beast/core.hpp)
+endif()
+if(BOOST_INCLUDE_DIR)
+    set(BOOST_FOUND TRUE)
+    list(APPEND BOOST_INCLUDE_DIRS ${BOOST_INCLUDE_DIR})
+endif()
+
+if(STREAM_BOOST_DIR)
+    find_library(BOOST_SYSTEM_LIB NAMES boost_system HINTS ${STREAM_BOOST_DIR})
+else()
+    find_library(BOOST_SYSTEM_LIB NAMES boost_system)
+endif()
+if(BOOST_SYSTEM_LIB)
+    list(APPEND BOOST_LIBRARIES ${BOOST_SYSTEM_LIB})
+endif()
+
+set(CIVETWEB_FOUND       ${CIVETWEB_FOUND}       PARENT_SCOPE)
+set(CIVETWEB_INCLUDE_DIRS "${CIVETWEB_INCLUDE_DIRS}" PARENT_SCOPE)
+set(CIVETWEB_LIBRARIES    "${CIVETWEB_LIBRARIES}"    PARENT_SCOPE)
+
+set(BOOST_FOUND          ${BOOST_FOUND}          PARENT_SCOPE)
+set(BOOST_INCLUDE_DIRS   "${BOOST_INCLUDE_DIRS}" PARENT_SCOPE)
+set(BOOST_LIBRARIES      "${BOOST_LIBRARIES}"    PARENT_SCOPE)
+
 
 # Compression (FFmpeg) — optional
 set(STREAM_COMPRESSION "AUTO" CACHE STRING "Enable compression via FFmpeg (AUTO, ON, OFF)")
@@ -215,19 +245,25 @@ ocv_target_link_libraries(${the_module} PRIVATE ${_stream_module_libs})
 
 # Tests
 if(BUILD_TESTS)
-    add_executable(test_stream test/test_stream.cpp)
+    add_executable(opencv_test_stream_http test/http_test.cpp)
+
     if(STREAM_SELECTED_BACKEND STREQUAL "MONGOOSE")
-        target_sources(test_stream PRIVATE ${STREAM_BACKEND_SOURCES})
+        target_sources(opencv_test_stream_http PRIVATE ${STREAM_BACKEND_SOURCES})
     endif()
+
     if(STREAM_BACKEND_INCLUDES)
-        target_include_directories(test_stream PRIVATE ${STREAM_BACKEND_INCLUDES})
+        target_include_directories(opencv_test_stream_http PRIVATE ${STREAM_BACKEND_INCLUDES})
     endif()
+
     set(_stream_test_libs ${the_module} ${STREAM_BACKEND_LIBS})
     if(STREAM_COMPRESSION_ENABLED)
         list(APPEND _stream_test_libs ${FFMPEG_LIBRARIES})
     endif()
-    target_link_libraries(test_stream PRIVATE ${_stream_test_libs})
+    target_link_libraries(opencv_test_stream_http PRIVATE ${_stream_test_libs})
+
+    target_compile_definitions(opencv_test_stream_http PRIVATE ${STREAM_BACKEND_DEFINITIONS})
 endif()
+
 
 # ------------------------------------------------------------------------------
 # Summary (printed once; warnings deferred until after the summary)
@@ -257,6 +293,8 @@ Stream configuration summary:\n\
   Boost (Beast) found      : ${_yn_BOOST}\n\
   FFmpeg found             : ${_yn_FFMPEG}\n\
   Compression (FFmpeg)     : ${_yn_COMP}\n")
+message(STATUS "Stream backend include path : ${STREAM_BACKEND_INCLUDES}")
+message(STATUS "Stream backend lib path: ${STREAM_BACKEND_LIBS}")
 
 foreach(_w IN LISTS STREAM_POST_WARNINGS)
     message(WARNING "${_w}")
