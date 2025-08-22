@@ -201,14 +201,16 @@ int main() {
         }
     }
 
+    if (ok.load()) {
+        std::cout << "[PASS] WebSocket round-trip 0..10 -> 1..11 verified\n";
+        std::cout << "Shutting down server and client..\n";
+        return 0;
+    }
+
     // Cleanup
     client->close();
     server->stop();
 
-    if (ok.load()) {
-        std::cout << "[PASS] WebSocket round-trip 0..10 -> 1..11 verified\n";
-        return 0;
-    }
     std::cerr << "[FAIL] WebSocket test failed\n";
     return 1;
 }
