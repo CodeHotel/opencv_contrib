@@ -243,26 +243,39 @@ if(STREAM_COMPRESSION_ENABLED)
 endif()
 ocv_target_link_libraries(${the_module} PRIVATE ${_stream_module_libs})
 
-# Tests
+# 4
 if(BUILD_TESTS)
-    add_executable(opencv_test_stream_http test/http_test.cpp)
+    # Make the flag available in both library and test sources
+    target_compile_definitions(${the_module} PRIVATE ocv_build_tests=1)
+    add_compile_definitions(OCV_BUILD_TESTS=1)
 
-    if(STREAM_SELECTED_BACKEND STREQUAL "MONGOOSE")
-        target_sources(opencv_test_stream_http PRIVATE ${STREAM_BACKEND_SOURCES})
-    endif()
-
-    if(STREAM_BACKEND_INCLUDES)
-        target_include_directories(opencv_test_stream_http PRIVATE ${STREAM_BACKEND_INCLUDES})
-    endif()
-
+    # Common link set for all tests
     set(_stream_test_libs ${the_module} ${STREAM_BACKEND_LIBS})
     if(STREAM_COMPRESSION_ENABLED)
         list(APPEND _stream_test_libs ${FFMPEG_LIBRARIES})
     endif()
-    target_link_libraries(opencv_test_stream_http PRIVATE ${_stream_test_libs})
 
-    target_compile_definitions(opencv_test_stream_http PRIVATE ${STREAM_BACKEND_DEFINITIONS})
+    # Helper to DRY up test targets
+    function(add_stream_test name src)
+        add_executable(${name} ${src})
+
+        if(STREAM_SELECTED_BACKEND STREQUAL "MONGOOSE")
+            target_sources(${name} PRIVATE ${STREAM_BACKEND_SOURCES})
+        endif()
+
+        if(STREAM_BACKEND_INCLUDES)
+            target_include_directories(${name} PRIVATE ${STREAM_BACKEND_INCLUDES})
+        endif()
+
+        target_link_libraries(${name} PRIVATE ${_stream_test_libs})
+        target_compile_definitions(${name} PRIVATE ${STREAM_BACKEND_DEFINITIONS})
+    endfunction()
+
+    # Tests
+    add_stream_test(opencv_test_stream_http ${CMAKE_CURRENT_SOURCE_DIR}/test/http_test.cpp)
+    add_stream_test(opencv_test_stream_websocket   ${CMAKE_CURRENT_SOURCE_DIR}/test/websocket_test.cpp)
 endif()
+
 
 
 # ------------------------------------------------------------------------------
