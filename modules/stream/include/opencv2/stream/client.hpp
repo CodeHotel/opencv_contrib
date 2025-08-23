@@ -94,5 +94,18 @@ namespace stream {
 } // namespace stream
 } // namespace cv
 
+
+// --- Debug Logging ---
+#ifdef DEBUG
+// FIX: Removed parentheses around `msg` to allow stream chaining.
+#define LOG_DEBUG(source, msg) do { \
+std::ostringstream os; \
+os << "[" << (source) << ":" << std::this_thread::get_id() << "] " << msg << std::endl; \
+std::cout << os.str(); \
+} while (0)
+#else
+#define LOG_DEBUG(source, msg)
+#endif
+
 #endif // OCV_BUILD_TESTS
 #endif // OPENCV_STREAM_CLIENT_HPP

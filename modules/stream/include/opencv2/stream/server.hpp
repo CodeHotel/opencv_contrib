@@ -147,4 +147,15 @@ namespace cv {
     } // namespace stream
 } // namespace cv
 
+// --- Debug Logging ---
+#ifdef DEBUG
+#define LOG_DEBUG(source, msg) do { \
+std::ostringstream os; \
+os << "[" << (source) << ":" << std::this_thread::get_id() << "] " << msg << std::endl; \
+std::cout << os.str(); \
+} while (0)
+#else
+#define LOG_DEBUG(source, msg)
+#endif
+
 #endif // OPENCV_STREAM_SERVER_HPP
