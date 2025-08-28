@@ -19,6 +19,12 @@ extern "C" {
 namespace cv {
 namespace stream {
 
+// Supported output codecs (and their hardware/software aliases) for streaming/recording:
+//   • H.264/AVC: "libx264", "h264_nvenc", "h264_qsv", "h264_videotoolbox", "h264_amf", "h264_vaapi", etc.
+//   • VP8:       "libvpx" or "libvpx-vp8"
+//   • AV1:       "libaom-av1", "libsvtav1", "av1_nvenc", "av1_qsv", "av1_vaapi", "av1_amf", etc.
+// Other codecs are not guaranteed. "auto" selects the best available from {H.264 → VP8 → AV1} for WebRTC/MSE paths.
+
 // --- Core configuration ------------------------------------------------------
 
 struct CV_EXPORTS_W EncoderParams {
@@ -29,41 +35,44 @@ struct CV_EXPORTS_W EncoderParams {
     CV_PROP_RW int bitrate = 0;      // bits/sec
     CV_PROP_RW int framerate = 0;    // fps
     CV_PROP_RW int gopSize = 0;      // keyframe interval
-    CV_PROP_RW std::string codecName; // "auto", "libx264", "h264_nvenc", ...
+
+    // Name of the FFmpeg encoder to use. Must resolve to H.264, VP8, or AV1.
+    // Examples:
+    //   H.264: "auto", "libx264", "h264_nvenc", "h264_qsv", "h264_videotoolbox", "h264_amf", "h264_vaapi"
+    //   VP8:   "libvpx", "libvpx-vp8"
+    //   AV1:   "libaom-av1", "libsvtav1", "av1_nvenc", "av1_qsv", "av1_vaapi", "av1_amf"
+    // If "auto", the implementation picks from {H.264 → VP8 → AV1} based on availability and runtime path.
+    CV_PROP_RW std::string codecName; // default empty/auto allowed
 };
 
 // --- Recording configuration -------------------------------------------------
 
-enum class RecordingContainer {
-    MP4, MKV, MOV
-};
+enum class RecordingContainer { MP4, MKV, MOV };
 
 struct CV_EXPORTS_W RecordingParams {
     CV_WRAP RecordingParams();
 
-    // Destination: file path or URI. Supports simple rolling pattern tokens:
-    // {utc}, {local}, {seq}. Example: "/var/rec/cam-{utc}.mp4"
+    // Destination file/URI. Supports rolling tokens {utc}, {local}, {seq}.
     CV_PROP_RW std::string destination;
 
-    // Container/muxer to use.
     CV_PROP_RW RecordingContainer container = RecordingContainer::MP4;
 
-    // Rolling segments (0 = single continuous file).
+    // Segmented recording: 0 = continuous file.
     CV_PROP_RW int segmentSeconds = 0;
 
-    // Max number of segments to retain (<=0 = unlimited). Oldest segments are pruned.
+    // Retention: <=0 = unlimited; oldest segments pruned when exceeded.
     CV_PROP_RW int maxSegments = 0;
 
-    // Force segment boundaries on keyframes when possible.
+    // Prefer cutting segments on keyframes.
     CV_PROP_RW bool segmentOnKeyframe = true;
 
-    // If true, start recording immediately once the encoder is opened.
+    // Start recording automatically on open().
     CV_PROP_RW bool autostart = false;
 
-    // Optional faststart/moov-at-beginning for MP4.
+    // MP4 faststart/moov-first when applicable.
     CV_PROP_RW bool optimizeForStreaming = true;
 
-    // Optional metadata.
+    // Optional container metadata (key/value).
     CV_PROP_RW std::map<std::string, std::string> metadata;
 };
 
@@ -78,25 +87,28 @@ public:
     CV_WRAP void release();
     CV_WRAP bool isOpened() const;
 
-    // Input
+    // Input: BGR frames matching width/height.
     CV_WRAP bool push(const cv::Mat& frame);
 
-    // Streaming egress
+    // Streaming egress:
+    //  - pullAsRtp: raw encoded packets (e.g., H.264 NAL units) for RTP/WebRTC.
+    //  - getFmp4InitializationSegment / pullAsFmp4: init + fragments for MSE over WebSockets.
     bool pullAsRtp(std::vector<uint8_t>& packet);
     bool getFmp4InitializationSegment(std::vector<uint8_t>& initSegment);
     bool pullAsFmp4(std::vector<uint8_t>& fragment);
 
-    // Recording control (can run concurrently with streaming)
-    CV_WRAP bool configureRecording(const RecordingParams& params); // may be called before or after open()
-    CV_WRAP bool startRecording();     // uses last configured RecordingParams
+    // Recording (can run concurrently with streaming).
+    CV_WRAP bool configureRecording(const RecordingParams& params);
+    CV_WRAP bool startRecording();
     CV_WRAP void stopRecording();
     CV_WRAP bool isRecording() const;
 
-    // Manual segment split (e.g., on external event); keeps recording running.
+    // Force a segment boundary while recording (keeps recording running).
     CV_WRAP bool splitSegment();
 
-    // Introspection / utilities
-    CV_WRAP static std::map<std::string, bool> getAvailableEncoders(); // encoder -> isHardware
+    // Returns available encoders filtered to those that produce H.264, VP8, or AV1.
+    // key = FFmpeg encoder name, value = isHardwareAccelerated
+    CV_WRAP static std::map<std::string, bool> getAvailableEncoders();
 
     Encoder(const Encoder&) = delete;
     Encoder& operator=(const Encoder&) = delete;
