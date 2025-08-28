@@ -1,3 +1,4 @@
+#if defined(HAVE_STREAM_COMPRESSION)
 #ifndef OPENCV_ENCODER_HPP
 #define OPENCV_ENCODER_HPP
 
@@ -124,3 +125,4 @@ private:
 } // namespace cv
 
 #endif // OPENCV_ENCODER_HPP
+#endif

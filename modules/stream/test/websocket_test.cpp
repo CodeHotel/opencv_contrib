@@ -1,6 +1,5 @@
 // test/websocket_test.cpp
-#ifdef OCV_BUILD_TESTS
-
+#if defined(OCV_BUILD_TESTS)
 #include "opencv2/stream/server.hpp"
 #include "opencv2/stream/client.hpp"
 
@@ -214,5 +213,4 @@ int main() {
     std::cerr << "[FAIL] WebSocket test failed\n";
     return 1;
 }
-
-#endif // OCV_BUILD_TESTS
+#endif

@@ -1,4 +1,4 @@
-#if defined(HAVE_STREAM_BACKEND_BOOST) && defined(OCV_BUILD_TESTS)
+#if defined(HAVE_STREAM_HTTP_BOOST) && defined(OCV_BUILD_TESTS)
 
 #include "opencv2/stream/client.hpp"
 

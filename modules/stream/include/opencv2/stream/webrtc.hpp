@@ -1,3 +1,4 @@
+#if defined(HAVE_STREAM_WEBRTC_GSTREAMER)
 #ifndef OPENCV_WEBRTC_HPP
 #define OPENCV_WEBRTC_HPP
 
@@ -191,3 +192,4 @@ CV_EXPORTS_W std::unique_ptr<WebRtcPeer> createWebRtcPeer();
 } // namespace cv
 
 #endif // OPENCV_WEBRTC_HPP
+#endif

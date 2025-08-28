@@ -1,3 +1,5 @@
+#if defined(HAVE_STREAM_WEBRTC_GSTREAMER)
+
 // webrtc.cpp
 #include <opencv2/stream/webrtc.hpp>
 
@@ -948,3 +950,4 @@ std::unique_ptr<WebRtcPeer> createWebRtcPeer() {
 
 } // namespace stream
 } // namespace cv
+#endif

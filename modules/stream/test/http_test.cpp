@@ -1,3 +1,4 @@
+#if defined(OCV_BUILD_TESTS)
 #include "opencv2/stream/server.hpp"
 #include <iostream>
 #include <thread>
@@ -49,3 +50,4 @@ int main() {
     // The server will be stopped automatically when the 'server' unique_ptr goes out of scope.
     return 0;
 }
+#endif

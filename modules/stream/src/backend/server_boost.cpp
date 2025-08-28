@@ -1,4 +1,4 @@
-#if defined(HAVE_STREAM_BACKEND_BOOST)
+#if defined(HAVE_STREAM_HTTP_BOOST)
 
 #include "opencv2/stream/server.hpp"
 

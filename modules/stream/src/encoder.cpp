@@ -1,5 +1,5 @@
+#if defined(HAVE_STREAM_COMPRESSION)
 #include "opencv2/core.hpp"
-#include "opencv2/imgproc.hpp"
 #include "opencv2/stream/encoder.hpp"
 
 #include <string>
@@ -32,6 +32,9 @@ static void initialize_ffmpeg() {
 
 namespace cv {
 namespace stream {
+
+EncoderParams::EncoderParams() = default;
+RecordingParams::RecordingParams() = default;
 
 // Internal implementation class
 class Encoder::EncoderImpl {
@@ -494,3 +497,4 @@ Encoder& Encoder::operator=(Encoder&&) noexcept = default;
 
 } // namespace stream
 } // namespace cv
+#endif

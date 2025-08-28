@@ -4,7 +4,7 @@
 // Builds only for test targets.
 // Requires civetweb built with USE_WEBSOCKET.
 //
-#if defined(HAVE_STREAM_BACKEND_CIVETWEB) && defined(OCV_BUILD_TESTS)
+#if defined(HAVE_STREAM_HTTP_CIVETWEB) && defined(OCV_BUILD_TESTS)
 
 #include "opencv2/stream/client.hpp"
 #include "opencv2/stream/server.hpp" // for WsCloseCode + WebSocketHandler

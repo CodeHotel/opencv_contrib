@@ -1,4 +1,4 @@
-#if defined(HAVE_STREAM_BACKEND_MONGOOSE)
+#if defined(HAVE_STREAM_HTTP_MONGOOSE)
 
 #include "opencv2/stream/client.hpp"
 #include "mongoose.h"

@@ -192,6 +192,11 @@ endif()
 
 ocv_define_module(stream opencv_core)
 
+# make OCV_BUILD_TESTS visible to code if BUILD_TESTS=ON
+if(BUILD_TESTS)
+    list(APPEND STREAM_DEFINES "OCV_BUILD_TESTS")
+endif()
+
 if(STREAM_SELECTED_HTTP_BACKEND STREQUAL "MONGOOSE")
     target_sources(${the_module} PRIVATE ${STREAM_HTTP_SOURCES})
 endif()
@@ -246,6 +251,7 @@ if(BUILD_TESTS)
             list(APPEND _test_libs ${FFMPEG_LIBRARIES})
         endif()
         target_link_libraries(${name} PRIVATE ${_test_libs})
+        message("TO ${name} appending private ${STREAM_DEFINES}")
         target_compile_definitions(${name} PRIVATE ${STREAM_DEFINES})
     endfunction()
 
