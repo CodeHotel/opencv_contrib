@@ -20,142 +20,207 @@ static const char* const kContentTypeCss  = "text/css; charset=utf-8";
 // Dynamic controls schema (optional)
 // -----------------------------------------------------------------------------
 
-// Parameter type rendered in the UI; encoded/transported as strings over WS.
 enum class ParamType {
-    Number,   // numeric text or slider; honor min/max/step if provided
-    Integer,  // integer spinner; honor min/max/step if provided
-    Boolean,  // checkbox/toggle (values "true"/"false")
-    Enum,     // dropdown (use options[])
-    Text      // freeform text input
+    Number,
+    Integer,
+    Boolean,
+    Enum,
+    Text
 };
 
-// Option for Enum
 struct ParamOption {
-    const char* value;   // serialized value
-    const char* label;   // human label
+    const char* value;
+    const char* label;
 };
 
-// One control in the panel. All string pointers must remain valid while
-// generating the page; they are embedded into the output.
 struct ParamSpec {
-    const char* id;            // stable machine id (used in WS messages)
-    const char* label;         // human label
+    const char* id;
+    const char* label;
     ParamType   type;
 
-    // Default/current value as string. The UI echoes this on load.
     const char* defaultValue;
 
-    // Optional numeric hints (used when type is Number/Integer)
-    double      minValue;      // ignored if minValue > maxValue
+    double      minValue;    // ignored if minValue > maxValue
     double      maxValue;
-    double      step;          // ignored if <= 0
+    double      step;        // ignored if <= 0
 
-    // Optional enum options (only used when type == Enum)
     const ParamOption* options;
     std::size_t        numOptions;
 
-    // Optional help text (tooltip), group/category name, and read-only flag
-    const char* help;          // may be nullptr
-    const char* group;         // may be nullptr
-    bool        readOnly;      // default false
+    const char* help;        // nullable
+    const char* group;       // nullable
+    bool        readOnly;    // default false
 };
 
 // -----------------------------------------------------------------------------
-// HTML pages
+// Media selection
 // -----------------------------------------------------------------------------
-// All functions write with snprintf-style assembly and return the total number
-// of bytes that would have been written (excluding the trailing '\0').
-// If the return value >= cap, the output was truncated.
 
-// Root index with links to sub-pages.
+// Which client-side runtime to use for the <video> element.
+enum class VideoClient {
+    Auto,   // pick based on stream_path scheme/heuristics
+    WebRTC, // use js_webrtc()
+    Fmp4,   // use js_fmp4()
+    Raw     // use js_raw()
+};
+
+// Which media presentation style to render in a "webview" page.
+enum class MediaView {
+    VideoOnly,      // show only video
+    ImageOnly,      // show only image
+    TabsVideoImage  // tabs to switch between video and image
+};
+
+// -----------------------------------------------------------------------------
+// HTML pages (snprintf-style; return would-be length, truncation if >= cap)
+// -----------------------------------------------------------------------------
+
+// Root index.
 CV_EXPORTS std::size_t root_page(
     char* dst, std::size_t cap,
-    const char* mount_path,           // e.g. "/"
-    const char* title                 // e.g. "OpenCV Stream"
+    const char* mount_path,
+    const char* title
 );
 
-// Simple embedded player (no controls), pointing to a media path:
-//   "/ws/raw"  (raw frames), "/ws/fmp4" (MSE), or "/webrtc" (signaling)
+// Embedded VIDEO page (back-compat).
 CV_EXPORTS std::size_t embedded_video_page(
     char* dst, std::size_t cap,
     const char* stream_path,
     const char* title
 );
 
-// --- Default webview ---------------------------------------------------------
-// Back-compat (no controls):
-CV_EXPORTS std::size_t webview_default_page(
+// Embedded VIDEO page with explicit JS client selection.
+CV_EXPORTS std::size_t embedded_video_page(
     char* dst, std::size_t cap,
-    const char* mount_path,
-    const char* ws_url,               // media or signaling URL
+    const char* stream_path,
+    VideoClient client,           // WebRTC / Fmp4 / Raw / Auto
     const char* title
 );
 
-// With optional live controls (sent/received over a dedicated control WS).
+// Embedded IMAGE page (simple <img>).
+CV_EXPORTS std::size_t embedded_image_page(
+    char* dst, std::size_t cap,
+    const char* image_url,
+    const char* title
+);
+
+// Embedded IMAGE page with auto-refresh.
+CV_EXPORTS std::size_t embedded_image_page(
+    char* dst, std::size_t cap,
+    const char* image_url,
+    int refresh_ms,               // <=0 disables auto-refresh
+    const char* title
+);
+
+// --- Default webview ---------------------------------------------------------
+
+// Back-compat (video-only, no controls).
 CV_EXPORTS std::size_t webview_default_page(
     char* dst, std::size_t cap,
     const char* mount_path,
-    const char* ws_url,               // media or signaling URL
-    const char* ws_ctrl_url,          // control channel WS; set nullptr to omit panel
-    const ParamSpec* controls,        // schema array; may be nullptr
+    const char* ws_url,
+    const char* title
+);
+
+// Video webview with controls.
+CV_EXPORTS std::size_t webview_default_page(
+    char* dst, std::size_t cap,
+    const char* mount_path,
+    const char* ws_url,
+    const char* ws_ctrl_url,      // nullable to omit controls
+    const ParamSpec* controls,    // nullable
+    std::size_t num_controls,
+    const char* title
+);
+
+// Image webview (image-only; no controls).
+CV_EXPORTS std::size_t webview_image_page(
+    char* dst, std::size_t cap,
+    const char* mount_path,
+    const char* image_url,
+    int refresh_ms,               // <=0 disables auto-refresh
+    const char* title
+);
+
+// Combined media webview: tabs to switch between video and image.
+// Uses VideoClient to select the video JS.
+CV_EXPORTS std::size_t webview_media_page(
+    char* dst, std::size_t cap,
+    const char* mount_path,
+    const char* ws_video_url,     // media or signaling URL for video
+    VideoClient video_client,     // WebRTC/Fmp4/Raw/Auto
+    const char* image_url,        // still or MJPEG snapshot endpoint
+    int refresh_ms,               // <=0 disables image auto-refresh
+    const char* ws_ctrl_url,      // nullable controls WS
+    const ParamSpec* controls,    // nullable
     std::size_t num_controls,
     const char* title
 );
 
 // --- Jupyter-friendly webview ------------------------------------------------
-// Back-compat (no controls):
-CV_EXPORTS std::size_t webview_jupyter_page(
-    char* dst, std::size_t cap,
-    const char* mount_path,           // base href in notebooks
-    const char* ws_url,               // media or signaling URL
-    const char* token                 // optional auth/token (can be empty string)
-);
 
-// With optional live controls:
+// Back-compat (video-only).
 CV_EXPORTS std::size_t webview_jupyter_page(
     char* dst, std::size_t cap,
     const char* mount_path,
-    const char* ws_url,
-    const char* ws_ctrl_url,          // control channel WS; set nullptr to omit panel
-    const ParamSpec* controls,
-    std::size_t num_controls,
-    const char* token                 // optional auth/token
+    const char* ws_url
+);
+
+// Image-only jupyter webview.
+CV_EXPORTS std::size_t webview_jupyter_image_page(
+    char* dst, std::size_t cap,
+    const char* mount_path,
+    const char* image_url,
+    int refresh_ms
+);
+
+// Combined media jupyter webview (tabs).
+CV_EXPORTS std::size_t webview_jupyter_media_page(
+    char* dst, std::size_t cap,
+    const char* mount_path,
+    const char* ws_video_url,
+    VideoClient video_client,
+    const char* image_url,
+    int refresh_ms,
+    const char* ws_ctrl_url,      // nullable
+    const ParamSpec* controls,    // nullable
+    std::size_t num_controls
 );
 
 // -----------------------------------------------------------------------------
 // JavaScript assets (snprintf-style; set Content-Type to kContentTypeJs)
 // -----------------------------------------------------------------------------
 
-// Minimal WebRTC helper used by the default/jupyter pages.
-// `signaling_path` is a relative or absolute WS/HTTP endpoint for SDP/ICE.
 CV_EXPORTS std::size_t js_webrtc(
     char* dst, std::size_t cap,
     const char* signaling_path
 );
 
-// MSE (fMP4) player helper: connects to `ws_media_path` and appends segments.
 CV_EXPORTS std::size_t js_fmp4(
     char* dst, std::size_t cap,
     const char* ws_media_path
 );
 
-// Raw frame viewer helper (WebSocket-driven).
 CV_EXPORTS std::size_t js_raw(
     char* dst, std::size_t cap,
     const char* ws_media_path
 );
 
-// UI runtime for the dynamic controls panel. It renders from ParamSpec
-// (embedded by the HTML generator) and syncs changes over `ws_ctrl_path`.
-// The same script also listens for server-originated updates to reflect
-// parameter changes occurring elsewhere in the pipeline.
+// Live image helper: updates <img> by cache-busting the URL every refresh_ms.
+CV_EXPORTS std::size_t js_image_live(
+    char* dst, std::size_t cap,
+    const char* image_url,
+    int refresh_ms                 // <=0 means one-shot
+);
+
+// UI runtime for dynamic controls.
 CV_EXPORTS std::size_t js_controls_runtime(
     char* dst, std::size_t cap,
-    const char* ws_ctrl_path       // e.g. "/ws/controls"; may be nullptr to no-op
+    const char* ws_ctrl_path
 );
 
 // -----------------------------------------------------------------------------
-// Optional CSS (tiny default styling for the controls panel & player shell).
+// Optional CSS
 // -----------------------------------------------------------------------------
 CV_EXPORTS std::size_t css_default_theme(
     char* dst, std::size_t cap
