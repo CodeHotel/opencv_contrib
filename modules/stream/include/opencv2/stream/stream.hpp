@@ -11,6 +11,7 @@
 #if defined(HAVE_STREAM_COMPRESSION)
 #include <opencv2/stream/encoder.hpp>
 #endif
+#include <opencv2/core/utils/logger.hpp>
 
 #include <cstddef>
 #include <cstdint>
