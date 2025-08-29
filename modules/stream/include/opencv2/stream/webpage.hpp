@@ -12,9 +12,9 @@ namespace webpage {
 // -----------------------------------------------------------------------------
 // MIME helpers
 // -----------------------------------------------------------------------------
-static const char* const kContentTypeHtml = "text/html; charset=utf-8";
-static const char* const kContentTypeJs   = "application/javascript; charset=utf-8";
-static const char* const kContentTypeCss  = "text/css; charset=utf-8";
+CV_EXPORTS extern const char* const kContentTypeHtml;
+CV_EXPORTS extern const char* const kContentTypeJs;
+CV_EXPORTS extern const char* const kContentTypeCss;
 
 // -----------------------------------------------------------------------------
 // Dynamic controls schema (optional)
