@@ -38,6 +38,9 @@ struct EndpointHandle {
     bool valid() const { return id >= 0; }
 };
 
+// Sources:
+//  - FrameSource: uncompressed cv::Mat frames (used by non-WebRTC endpoints).
+//  - EncodedSource: pre-encoded elementary AUs/OBUs (H.264/VP8/AV1) for WebRTC.
 typedef std::function<bool(cv::Mat& outFrame, int64_t& ptsNs)> FrameSource;
 typedef std::function<bool(std::vector<uint8_t>& au, bool& key, int64_t& ptsNs)> EncodedSource;
 
@@ -70,7 +73,7 @@ struct CV_EXPORTS_W Fmp4Options {
 struct CV_EXPORTS_W WebRtcOptions {
     CV_WRAP WebRtcOptions() : autostartOffer(true), title("OpenCV Stream") {}
     CV_PROP_RW WebRtcParams  webrtc;
-    CV_PROP_RW IngestParams  ingest;
+    CV_PROP_RW IngestParams  ingest; // encoded-only (H.264/VP8/AV1 elementary stream)
     CV_PROP_RW bool autostartOffer;
     CV_PROP_RW std::string title;
 };
@@ -110,21 +113,23 @@ public:
 
     // --- Endpoint registration ---
 
+    // Uncompressed frame endpoints (HTTP-based viewers, etc.)
     CV_WRAP EndpointHandle addRaw(const std::string& path,
                                   const FrameSource& source,
                                   const RawOptions& opts = RawOptions());
 
+    // fMP4 endpoint (server-side encoding/muxing)
     CV_WRAP EndpointHandle addFmp4(const std::string& path,
                                    const FrameSource& source,
                                    const Fmp4Options& opts = Fmp4Options());
 
 #if defined(HAVE_STREAM_WEBRTC_GSTREAMER)
+    // WebRTC endpoint — **encoded-only** (H.264/VP8/AV1 elementary stream units)
     CV_WRAP EndpointHandle addWebRtc(const std::string& path,
                                      const EncodedSource& encodedSource,
                                      const WebRtcOptions& opts);
-    CV_WRAP EndpointHandle addWebRtcRaw(const std::string& path,
-                                        const FrameSource& rawSource,
-                                        const WebRtcOptions& opts);
+
+    // NOTE: addWebRtcRaw(...) has been removed; WebRTC no longer accepts raw frames.
 #endif
 
     CV_WRAP void remove(const EndpointHandle& h);
@@ -188,7 +193,8 @@ public:
     // -------------------------------------------------------------------------
     // Notes:
     //  - For fMP4 endpoints, recording uses the same encoder/muxer chain.
-    //  - For WebRTC endpoints, implementation may mux pre-encoded input or re-use the encoder chain.
+    //  - For WebRTC endpoints, recording **muxes the pre-encoded input**; there is
+    //    no internal encoder chain for WebRTC anymore.
     //  - Start returns the resolved destination (empty string on failure).
     //  - Destination "" uses the last configured RecordingParams/destination.
 

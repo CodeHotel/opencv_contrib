@@ -1,17 +1,11 @@
 #if defined(HAVE_STREAM_WEBRTC_GSTREAMER)
 
-// webrtc.cpp (verbose)
+// webrtc.cpp (encoded-only)
 // Build: requires GStreamer (core + webrtc + sdp + app + debugutils)
-// This file is extremely chatty to stderr for deep troubleshooting.
 //
-// To get .dot pipeline graph dumps, set:
-//   export CV_WRTC_DOT=1
-// Files will be written under the current working directory.
-//
-// Helpful run-time:
-//   GST_DEBUG=webrtcbin:4,rtph264pay:3,h264*:3,videoconvert:3,appsrc:3,*WARN* ./app
-//
-// ---------------------------------------------------------------------------
+// This variant **does not accept raw frames**. You must feed pre-encoded
+// H.264 / VP8 / AV1 AUs/OBUs via pushEncoded()/pushH264().
+// (e.g., encode with FFmpeg/Encoder first, then pass the encoded units here.)
 
 #include <opencv2/stream/webrtc.hpp>
 
@@ -24,8 +18,9 @@
 #include <utility>
 #include <string>
 #include <vector>
+#include <cstring>
 
-// GStreamer (private to impl – not exposed in public headers)
+// GStreamer
 #include <cinttypes>
 #include <gst/gst.h>
 #include <gst/app/gstappsrc.h>
@@ -70,22 +65,18 @@ static inline void dot_dump(GstElement* pipeline, const char* why) {
 #endif
 }
 
-// ============================================================================
-// Utilities (private)
-// ============================================================================
-// Put these near the top of the file (static helpers)
+// small utils
 static inline bool has_prop(GObject* obj, const char* name) {
     if (!obj || !name) return false;
     GObjectClass* cls = G_OBJECT_GET_CLASS(obj);
     return g_object_class_find_property(cls, name) != nullptr;
 }
-static inline bool starts_with(const std::string& s, const char* pfx) {
-    return s.rfind(pfx, 0) == 0;
-}
 
-// FUNCTION: configureIceServers
-// REPLACEMENT FOR YOUR EXISTING "ICE servers" SETUP CODE
-    static void configureIceServers(GstElement* webrtc, const std::vector<IceServer>& servers) {
+// ============================================================================
+// ICE server helper
+// ============================================================================
+
+static void configureIceServers(GstElement* webrtc, const std::vector<IceServer>& servers) {
     if (!webrtc || servers.empty()) return;
 
     if (has_prop(G_OBJECT(webrtc), "ice-servers")) {
@@ -100,7 +91,7 @@ static inline bool starts_with(const std::string& s, const char* pfx) {
         return;
     }
 
-    // Legacy path
+    // Legacy path (older webrtcbin)
     for (const auto& s : servers) {
         if (s.uri.rfind("stun:", 0) == 0 || s.uri.rfind("stuns:", 0) == 0) {
             std::string stun = (s.uri.rfind("stuns:",0)==0)
@@ -118,7 +109,6 @@ static inline bool starts_with(const std::string& s, const char* pfx) {
         }
     }
 }
-
 
 namespace {
 
@@ -146,7 +136,6 @@ inline ConnState toConnState(GstWebRTCPeerConnectionState st) {
 inline GstWebRTCSDPType toGstType(const std::string& t) {
     if (t == "offer")  return GST_WEBRTC_SDP_TYPE_OFFER;
     if (t == "answer") return GST_WEBRTC_SDP_TYPE_ANSWER;
-    // fallthrough – treat others as answer
     return GST_WEBRTC_SDP_TYPE_ANSWER;
 }
 
@@ -214,110 +203,12 @@ inline GstCaps* makeEncodedCaps(VideoCodec codec, const IngestParams& ingest) {
             break;
     }
     if (!caps) return nullptr;
-    if (ingest.width  > 0) gst_caps_set_simple(caps, "width",  G_TYPE_INT, ingest.width,  nullptr);
-    if (ingest.height > 0) gst_caps_set_simple(caps, "height", G_TYPE_INT, ingest.height, nullptr);
-    if (ingest.framerate > 0) gst_caps_set_simple(caps, "framerate", GST_TYPE_FRACTION, ingest.framerate, 1, nullptr);
+    if (ingest.framerate > 0) {
+        gst_caps_set_simple(caps, "framerate", GST_TYPE_FRACTION, ingest.framerate, 1, nullptr);
+    }
     wrtc_log("caps (encoded): %s", capsToStr(caps).c_str());
     return caps;
 }
-
-inline GstElement* makeEncoderFor(VideoCodec codec, const WebRtcParams& params, const IngestParams& ingest) {
-    auto set_if = [](GstElement* e, const char* prop, gint value) {
-        if (!e) return;
-        GObjectClass* klass = G_OBJECT_GET_CLASS(e);
-        if (g_object_class_find_property(klass, prop)) {
-            g_object_set(e, prop, value, nullptr);
-        }
-    };
-    auto set_if_ll = [](GstElement* e, const char* prop, glong value) {
-        if (!e) return;
-        GObjectClass* klass = G_OBJECT_GET_CLASS(e);
-        if (g_object_class_find_property(klass, prop)) {
-            g_object_set(e, prop, value, nullptr);
-        }
-    };
-    // Use kbps for "bitrate" everywhere (x264enc, nvh264enc, vaapi, etc.),
-    // and bps for "target-bitrate" where present (e.g. vp8enc).
-    auto set_bitrate_safely = [&](GstElement* e) {
-        if (!e || params.initialBitrate <= 0) return;
-        const gint kbps = std::max(1, params.initialBitrate / 1000);
-        set_if(e, "bitrate", kbps);                 // kbps
-        set_if_ll(e, "target-bitrate", params.initialBitrate); // bps
-    };
-
-    switch (codec) {
-        case VideoCodec::H264: {
-            const char* cand[] = { "nvh264enc", "x264enc", "vaapih264enc", "vtenc_h264", "qsvh264enc", "openh264enc" };
-            for (const char* name : cand) {
-                wrtc_log("encoder: trying '%s'...", name);
-                GstElement* e = gst_element_factory_make(name, nullptr);
-                if (!e) { wrtc_log("  -> not available"); continue; }
-
-                const char* tname = G_OBJECT_TYPE_NAME(e);
-                wrtc_log("  -> created %s", tname);
-
-                if (g_strcmp0(tname, "GstX264Enc") == 0) {
-                    set_if(e, "tune", 0x00000004 /*zerolatency*/);
-                    set_if(e, "speed-preset", 1 /*ultrafast*/);
-                    GObjectClass* kc = G_OBJECT_GET_CLASS(e);
-                    if (g_object_class_find_property(kc, "byte-stream"))
-                        g_object_set(e, "byte-stream", TRUE, nullptr);
-                    set_bitrate_safely(e);
-                    if (ingest.framerate > 0) set_if(e, "key-int-max", ingest.framerate);
-                } else if (g_str_has_prefix(tname, "GstNvH264Enc")) {
-                    set_bitrate_safely(e); // **kbps** for 'bitrate' here
-                    if (ingest.framerate > 0) set_if(e, "key-int-max", ingest.framerate);
-                } else if (g_str_has_prefix(tname, "GstVaapiH264Enc")) {
-                    set_bitrate_safely(e);
-                    if (ingest.framerate > 0) set_if(e, "key-int-max", ingest.framerate);
-                } else if (g_str_has_prefix(tname, "GstVTEncH264")) {
-                    set_bitrate_safely(e);
-                } else if (g_str_has_prefix(tname, "GstQsvH264Enc")) {
-                    set_bitrate_safely(e);
-                    if (ingest.framerate > 0) set_if(e, "key-int-max", ingest.framerate);
-                } else if (g_str_has_prefix(tname, "GstOpenH264Enc")) {
-                    set_bitrate_safely(e);
-                    if (ingest.framerate > 0) set_if(e, "key-int-max", ingest.framerate);
-                }
-                return e;
-            }
-            wrtc_log("encoder: no H264 encoder found");
-            break;
-        }
-
-        case VideoCodec::VP8: {
-            wrtc_log("encoder: trying 'vp8enc'...");
-            GstElement* e = gst_element_factory_make("vp8enc", nullptr);
-            if (e) {
-                wrtc_log("  -> created GstVP8Enc");
-                set_if_ll(e, "deadline", 1);
-                set_if(e, "cpu-used", 8);
-                set_if_ll(e, "target-bitrate",
-                          params.initialBitrate > 0 ? params.initialBitrate : 800000);
-            } else {
-                wrtc_log("  -> not available");
-            }
-            return e;
-        }
-
-        case VideoCodec::AV1: {
-            const char* cand[] = { "nvav1enc", "svtav1enc", "av1enc" };
-            for (const char* name : cand) {
-                wrtc_log("encoder: trying '%s'...", name);
-                GstElement* e = gst_element_factory_make(name, nullptr);
-                if (!e) { wrtc_log("  -> not available"); continue; }
-                wrtc_log("  -> created %s", G_OBJECT_TYPE_NAME(e));
-                set_bitrate_safely(e);
-                return e;
-            }
-            wrtc_log("encoder: no AV1 encoder found");
-            break;
-        }
-    }
-    return nullptr;
-}
-
-
 
 inline GstElement* makePayloaderFor(VideoCodec codec) {
     const char* name = nullptr;
@@ -356,7 +247,6 @@ void ensureInit() {
         wrtc_log("gst_init()");
         gst_init(nullptr, nullptr);
 
-        // Check presence of key factories up front
         const char* must_have[] = { "webrtcbin", "rtph264pay", "h264parse" };
         for (const char* n : must_have) {
             GstElementFactory* f = gst_element_factory_find(n);
@@ -425,7 +315,7 @@ std::string makeIceJson(const IceCandidate& in) {
 }
 
 // ============================================================================
-// WebRtcPeer implementation
+// WebRtcPeer implementation (encoded-only)
 // ============================================================================
 
 class WebRtcPeer::Impl {
@@ -435,8 +325,6 @@ public:
           context_(nullptr),
           pipeline_(nullptr),
           appsrc_(nullptr),
-          conv_(nullptr),
-          enc_(nullptr),
           parse_(nullptr),
           pay_(nullptr),
           webrtc_(nullptr),
@@ -460,15 +348,15 @@ public:
     bool setRemoteDescription(const Sdp& remote);
     bool addRemoteIceCandidate(const IceCandidate& c);
 
-    bool pushRawFrame(const cv::Mat& frame, int64_t ptsNs);
+    // ENCODED ONLY
     bool pushEncoded(VideoCodec codec, const uint8_t* data, size_t bytes, bool keyFrame, int64_t ptsNs);
     bool pushH264(const uint8_t* data, size_t bytes, bool keyFrame, int64_t ptsNs) {
         return pushEncoded(VideoCodec::H264, data, bytes, keyFrame, ptsNs);
     }
 
-    void forceKeyframe();
-    void setTargetBitrate(int bps);
-    void setFramerate(int fps);
+    void forceKeyframe();                 // best-effort; upstream is appsrc/parse
+    void setTargetBitrate(int bps);       // no-op in encoded-only mode
+    void setFramerate(int fps);           // pacing only if PTS not provided
     void setWriteQueueLimitBytes(size_t bytes);
     bool sendDataMessage(const void* data, size_t nBytes, bool binary);
 
@@ -486,8 +374,8 @@ private:
     VideoCodec selectCodec(const WebRtcParams& p) const;
 
     // Members
-    WebRtcParams   params_;
-    IngestParams   ingest_;
+    WebRtcParams    params_;
+    IngestParams    ingest_;
     WebRtcCallbacks cb_;
 
     GMainLoop*     loop_;
@@ -496,8 +384,6 @@ private:
 
     GstElement* pipeline_;
     GstElement* appsrc_;
-    GstElement* conv_;
-    GstElement* enc_;
     GstElement* parse_;
     GstElement* pay_;
     GstElement* webrtc_;
@@ -511,46 +397,10 @@ private:
     guint64 pts_gen_ns_;
     guint64 frame_duration_ns_;
 
-    std::atomic<uint64_t> raw_push_count_{0};
     std::atomic<uint64_t> enc_push_count_{0};
-    // ---- Legacy helpers (properties/signals present?) ----
-    static inline bool has_prop(GObject* obj, const char* name) {
-        if (!obj || !name) return false;
-        GObjectClass* klass = G_OBJECT_GET_CLASS(obj);
-        return klass && g_object_class_find_property(klass, name) != nullptr;
-    }
-    static inline bool has_signal(GObject* obj, const char* name) {
-        if (!obj || !name) return false;
-        return g_signal_lookup(name, G_OBJECT_TYPE(obj)) != 0;
-    }
-    // Build a legacy-compatible TURN URI for old 'turn-server' property if needed
-    static inline std::string make_turn_legacy_uri(const IceServer& s) {
-        // turn://user:pass@host:port
-        // NOTE: very old webrtcbin expects a simple string; transport params may be ignored.
-        if (s.uri.rfind("turn:", 0) == 0 || s.uri.rfind("turns:", 0) == 0) {
-            // Best effort: if user/pass present, reformat
-            if (!s.username.empty()) {
-                std::string scheme = (s.uri.rfind("turns:", 0) == 0) ? "turns://" : "turn://";
-                // Extract host:port from s.uri (rudimentary)
-                auto pos = s.uri.find(':');                // after "turn"
-                pos = s.uri.find(':', pos + 1);            // after scheme colon
-                std::string hostport = (pos != std::string::npos) ? s.uri.substr(pos + 1) : s.uri;
-                // remove leading slashes if any
-                while (!hostport.empty() && (hostport[0] == '/' || hostport[0] == '/')) hostport.erase(0,1);
-                std::string auth = s.username + (s.credential.empty() ? "" : (":" + s.credential));
-                return scheme + auth + "@" + hostport;
-            }
-            // No creds → just swap to // form for old prop
-            std::string out = (s.uri.rfind("turns:",0)==0) ? ("turns://" + s.uri.substr(6))
-                                                           : ("turn://"  + s.uri.substr(5));
-            return out;
-        }
-        return std::string();
-    }
-
 };
 
-VideoCodec WebRtcPeer::Impl::selectCodec(const WebRtcParams& p) const {
+inline VideoCodec WebRtcPeer::Impl::selectCodec(const WebRtcParams& p) const {
     wrtc_log("selectCodec: preferred list size=%zu", p.preferredCodecs.size());
     for (auto c : p.preferredCodecs) {
         wrtc_log("  pref: %s", toString(c));
@@ -574,8 +424,7 @@ bool WebRtcPeer::Impl::buildPipeline() {
         return false;
     };
 
-    wrtc_log("buildPipeline: begin (mode=%s)",
-             ingest_.mode == IngestMode::PreEncodedElementary ? "PreEncodedElementary" : "AutoEncodeRawBGR");
+    wrtc_log("buildPipeline: begin (encoded-only)");
 
     pipeline_ = gst_pipeline_new(nullptr);
     if (!pipeline_) return fail("new-pipeline");
@@ -590,118 +439,64 @@ bool WebRtcPeer::Impl::buildPipeline() {
     negotiatedCodec_ = selectCodec(params_);
     wrtc_log("negotiated codec preference = %s", toString(negotiatedCodec_));
 
-    if (ingest_.mode == IngestMode::PreEncodedElementary) {
+    // Set caps for encoded input
+    {
         GstCaps* caps = makeEncodedCaps(negotiatedCodec_, ingest_);
         if (!caps) return fail("encoded-caps");
         g_object_set(appsrc_, "caps", caps, nullptr);
         gst_caps_unref(caps);
-
-        parse_ = nullptr;
-        if (negotiatedCodec_ == VideoCodec::H264) {
-            parse_ = gst_element_factory_make("h264parse", nullptr);
-            if (!parse_) return fail("make-h264parse");
-            g_object_set(parse_, "config-interval", 1, nullptr);
-        } else if (negotiatedCodec_ == VideoCodec::AV1) {
-            parse_ = gst_element_factory_make("av1parse", nullptr);
-            if (!parse_) return fail("make-av1parse");
-        }
-
-        pay_ = makePayloaderFor(negotiatedCodec_);
-        if (!pay_) return fail("make-payloader");
-        setPayloaderDefaults(pay_);
-
-        webrtc_ = gst_element_factory_make("webrtcbin", "webrtcbin");
-        if (!webrtc_) return fail("make-webrtcbin");
-
-        gst_bin_add(GST_BIN(pipeline_), appsrc_);
-        if (parse_) gst_bin_add(GST_BIN(pipeline_), parse_);
-        gst_bin_add_many(GST_BIN(pipeline_), pay_, webrtc_, nullptr);
-
-        // --- legacy nudge: go READY before requesting pads on older webrtcbin
-        gst_element_set_state(pipeline_, GST_STATE_READY);
-
-        if (parse_) {
-            wrtc_log("link: appsrc -> h26x/av1 parse -> pay");
-            if (!gst_element_link(appsrc_, parse_)) return fail("link-appsrc-parse");
-            if (!gst_element_link(parse_,  pay_ ))  return fail("link-parse-pay");
-        } else {
-            wrtc_log("link: appsrc -> pay");
-            if (!gst_element_link(appsrc_, pay_))   return fail("link-appsrc-pay");
-        }
-
-        if (!linkRtpToWebrtc()) return fail("link-pay-webrtc");
-
-    } else {
-        // Raw path
-        GstCaps* rawCaps = gst_caps_new_empty_simple("video/x-raw");
-        gst_caps_set_simple(rawCaps, "format", G_TYPE_STRING, "BGR", nullptr);
-        if (ingest_.width  > 0) gst_caps_set_simple(rawCaps, "width",  G_TYPE_INT, ingest_.width,  nullptr);
-        if (ingest_.height > 0) gst_caps_set_simple(rawCaps, "height", G_TYPE_INT, ingest_.height, nullptr);
-        if (ingest_.framerate > 0) gst_caps_set_simple(rawCaps, "framerate", GST_TYPE_FRACTION, ingest_.framerate, 1, nullptr);
-        wrtc_log("caps (raw): %s", capsToStr(rawCaps).c_str());
-        g_object_set(appsrc_, "caps", rawCaps, nullptr);
-        gst_caps_unref(rawCaps);
-
-        conv_ = gst_element_factory_make("videoconvert", nullptr);
-        if (!conv_) return fail("make-videoconvert");
-        wrtc_log("videoconvert: created");
-
-        enc_  = makeEncoderFor(negotiatedCodec_, params_, ingest_);
-        if (!enc_) return fail("make-encoder");
-
-        pay_  = makePayloaderFor(negotiatedCodec_);
-        if (!pay_) return fail("make-payloader");
-        setPayloaderDefaults(pay_);
-
-        webrtc_ = gst_element_factory_make("webrtcbin", "webrtcbin");
-        if (!webrtc_) return fail("make-webrtcbin");
-
-        gst_bin_add_many(GST_BIN(pipeline_), appsrc_, conv_, enc_, nullptr);
-
-        if (negotiatedCodec_ == VideoCodec::H264) {
-            parse_ = gst_element_factory_make("h264parse", nullptr);
-            if (!parse_) return fail("make-h264parse");
-            g_object_set(parse_, "config-interval", 1, nullptr);
-            gst_bin_add_many(GST_BIN(pipeline_), parse_, pay_, webrtc_, nullptr);
-
-            // --- legacy nudge: go READY before requesting pads on older webrtcbin
-            gst_element_set_state(pipeline_, GST_STATE_READY);
-
-            wrtc_log("link: appsrc -> convert -> enc -> h264parse -> pay");
-            if (!gst_element_link(appsrc_, conv_)) return fail("link-appsrc-conv");
-            if (!gst_element_link(conv_,  enc_ ))  return fail("link-conv-enc");
-            if (!gst_element_link(enc_,   parse_)) return fail("link-enc-parse");
-            if (!gst_element_link(parse_, pay_ ))  return fail("link-parse-pay");
-        } else {
-            gst_bin_add_many(GST_BIN(pipeline_), pay_, webrtc_, nullptr);
-
-            // --- legacy nudge: go READY before requesting pads on older webrtcbin
-            gst_element_set_state(pipeline_, GST_STATE_READY);
-
-            wrtc_log("link: appsrc -> convert -> enc -> pay");
-            if (!gst_element_link(appsrc_, conv_)) return fail("link-appsrc-conv");
-            if (!gst_element_link(conv_,  enc_ ))  return fail("link-conv-enc");
-            if (!gst_element_link(enc_,   pay_ ))  return fail("link-enc-pay");
-        }
-
-        if (!linkRtpToWebrtc()) return fail("link-pay-webrtc");
     }
 
-    // ---- Legacy-safe MTU + ICE servers ----
+    // Optional parser for some codecs
+    parse_ = nullptr;
+    if (negotiatedCodec_ == VideoCodec::H264) {
+        parse_ = gst_element_factory_make("h264parse", nullptr);
+        if (!parse_) return fail("make-h264parse");
+        g_object_set(parse_, "config-interval", 1, nullptr);
+    } else if (negotiatedCodec_ == VideoCodec::AV1) {
+        parse_ = gst_element_factory_make("av1parse", nullptr);
+        if (!parse_) return fail("make-av1parse");
+    }
+
+    pay_ = makePayloaderFor(negotiatedCodec_);
+    if (!pay_) return fail("make-payloader");
+    setPayloaderDefaults(pay_);
+
+    webrtc_ = gst_element_factory_make("webrtcbin", "webrtcbin");
+    if (!webrtc_) return fail("make-webrtcbin");
+
+    // Assemble
+    gst_bin_add(GST_BIN(pipeline_), appsrc_);
+    if (parse_) gst_bin_add(GST_BIN(pipeline_), parse_);
+    gst_bin_add_many(GST_BIN(pipeline_), pay_, webrtc_, nullptr);
+
+    // Some versions of webrtcbin behave better if pipeline is READY before pad requests
+    gst_element_set_state(pipeline_, GST_STATE_READY);
+
+    if (parse_) {
+        wrtc_log("link: appsrc -> parse -> pay");
+        if (!gst_element_link(appsrc_, parse_)) return fail("link-appsrc-parse");
+        if (!gst_element_link(parse_,  pay_ ))  return fail("link-parse-pay");
+    } else {
+        wrtc_log("link: appsrc -> pay");
+        if (!gst_element_link(appsrc_, pay_))   return fail("link-appsrc-pay");
+    }
+
+    if (!linkRtpToWebrtc()) return fail("link-pay-webrtc");
+
+    // Legacy-safe MTU + ICE
     if (params_.mtu > 0 && has_prop(G_OBJECT(webrtc_), "mtu")) {
         wrtc_log("webrtcbin: set mtu=%d", params_.mtu);
         g_object_set(webrtc_, "mtu", params_.mtu, nullptr);
     } else if (params_.mtu > 0) {
         wrtc_log("webrtcbin: 'mtu' property not present (legacy)");
     }
-
     if (!params_.iceServers.empty()) {
         wrtc_log("webrtcbin: configuring %zu ICE server(s)", params_.iceServers.size());
         configureIceServers(webrtc_, params_.iceServers);
     }
 
-
-    // bus
+    // Bus watch
     GstBus* bus = gst_pipeline_get_bus(GST_PIPELINE(pipeline_));
     gst_bus_add_signal_watch(bus);
     g_signal_connect(bus, "message", G_CALLBACK(&Impl::onBusMessage), this);
@@ -712,12 +507,9 @@ bool WebRtcPeer::Impl::buildPipeline() {
     return true;
 }
 
-
-
 bool WebRtcPeer::Impl::linkRtpToWebrtc() {
     wrtc_log("linkRtpToWebrtc: begin");
 
-    // pay ! webrtcbin with filtered link (this will request a sink_%u pad internally)
     GstCaps* rtp_caps = nullptr;
     switch (negotiatedCodec_) {
         case VideoCodec::H264:
@@ -747,17 +539,12 @@ bool WebRtcPeer::Impl::linkRtpToWebrtc() {
     }
     wrtc_log("  -> filtered link caps: %s", capsToStr(rtp_caps).c_str());
 
-    // This will (a) create a sink_%u request pad on webrtcbin and (b) link pay->webrtcbin
-    gboolean ok = gst_element_link_pads_filtered(
-        pay_, "src", webrtc_, "sink_%u", rtp_caps);
-
+    gboolean ok = gst_element_link_pads_filtered(pay_, "src", webrtc_, "sink_%u", rtp_caps);
     if (rtp_caps) gst_caps_unref(rtp_caps);
 
     wrtc_log("linkRtpToWebrtc: %s", ok ? "OK" : "FAIL");
     return ok;
 }
-
-
 
 void WebRtcPeer::Impl::runMain() {
     wrtc_log("runMain: entering main loop");
@@ -795,7 +582,6 @@ void WebRtcPeer::Impl::onBusMessage(GstBus* /*bus*/, GstMessage* msg, gpointer u
             if (dbg) g_free(dbg);
             dot_dump(self->pipeline_, "bus_error");
             break;
-
         }
         case GST_MESSAGE_WARNING: {
             GError* err = nullptr; gchar* dbg = nullptr;
@@ -841,15 +627,12 @@ bool WebRtcPeer::Impl::open(const WebRtcParams& p, const IngestParams& ing, cons
     if (opened_) { wrtc_log("open: already opened"); return true; }
     ensureInit();
 
-    // Deep copy (defensive) and log a subset of params
     params_ = p;
     ingest_ = ing;
     cb_     = cb;
 
-    wrtc_log("open: ingest (mode=%s, %dx%d @ %dfps, usePTS=%d, maxQ=%zu)",
-             ingest_.mode == IngestMode::PreEncodedElementary ? "PreEncoded" : "Raw",
-             ingest_.width, ingest_.height, ingest_.framerate,
-             (int)ingest_.useProvidedTimestamps, params_.maxQueueBytes);
+    wrtc_log("open: ingest (ENCODED-ONLY, fps=%d, usePTS=%d, maxQ=%zu)",
+             ingest_.framerate, (int)ingest_.useProvidedTimestamps, params_.maxQueueBytes);
     wrtc_log("open: bitrate hints (init=%d, min=%d, max=%d), mtu=%d, lowLat=%d, dataCh=%d label='%s'",
              params_.initialBitrate, params_.minBitrate, params_.maxBitrate,
              params_.mtu, (int)params_.lowLatency,
@@ -857,7 +640,6 @@ bool WebRtcPeer::Impl::open(const WebRtcParams& p, const IngestParams& ing, cons
     wrtc_log("open: preferred codecs: %zu", params_.preferredCodecs.size());
     for (auto c : params_.preferredCodecs) wrtc_log("  - %s", toString(c));
 
-    // Dedicated GLib context per peer to keep things isolated.
     context_ = g_main_context_new();
     wrtc_log("g_main_context_new -> %p", (void*)context_);
 
@@ -869,8 +651,7 @@ bool WebRtcPeer::Impl::open(const WebRtcParams& p, const IngestParams& ing, cons
         return false;
     }
 
-    // ---- webrtcbin signals (legacy-safe) ----
-    // on-ice-candidate (exists across versions)
+    // webrtcbin signals
     g_signal_connect(webrtc_, "on-ice-candidate",
         G_CALLBACK(+[](GstElement* /*webrtc*/, guint mline, gchar* candidate, gpointer u) {
             Impl* self = static_cast<Impl*>(u);
@@ -878,21 +659,20 @@ bool WebRtcPeer::Impl::open(const WebRtcParams& p, const IngestParams& ing, cons
             if (self->cb_.onIceCandidate) {
                 IceCandidate ic;
                 ic.candidate = candidate ? candidate : "";
-                ic.sdpMid.clear();                 // IMPORTANT: no mid for legacy SDP
-                ic.sdpMLineIndex = (int)mline;     // Use the provided m-line index
+                ic.sdpMid.clear();                 // keep legacy compatibility: mid may be empty
+                ic.sdpMLineIndex = (int)mline;
                 self->cb_.onIceCandidate(ic);
             }
         }), this);
 
-    // Modern: on-connection-state; Legacy: on-ice-connection-state
-    if (has_signal(G_OBJECT(webrtc_), "on-connection-state")) {
+    if (g_signal_lookup("on-connection-state", G_OBJECT_TYPE(webrtc_))) {
         g_signal_connect(webrtc_, "on-connection-state",
             G_CALLBACK(+[](GstElement*, GstWebRTCPeerConnectionState st, gpointer u) {
                 Impl* self = static_cast<Impl*>(u);
                 wrtc_log("signal: on-connection-state -> %d", (int)st);
                 self->changeState(toConnState(st));
             }), this);
-    } else if (has_signal(G_OBJECT(webrtc_), "on-ice-connection-state")) {
+    } else if (g_signal_lookup("on-ice-connection-state", G_OBJECT_TYPE(webrtc_))) {
         g_signal_connect(webrtc_, "on-ice-connection-state",
             G_CALLBACK(+[](GstElement*, GstWebRTCICEConnectionState st, gpointer u) {
                 Impl* self = static_cast<Impl*>(u);
@@ -912,10 +692,8 @@ bool WebRtcPeer::Impl::open(const WebRtcParams& p, const IngestParams& ing, cons
         wrtc_log("webrtcbin: no connection-state signals found (very old)");
     }
 
-    // Prefer negotiating when the element says it's ready (modern).
-    // If the legacy build lacks that signal, we'll call createOffer() below.
-    bool have_neg_needed = has_signal(G_OBJECT(webrtc_), "on-negotiation-needed");
-    if (have_neg_needed) {
+    // negotiation (modern path)
+    if (g_signal_lookup("on-negotiation-needed", G_OBJECT_TYPE(webrtc_))) {
         g_signal_connect(webrtc_, "on-negotiation-needed",
             G_CALLBACK(+[](GstElement* webrtc, gpointer u) {
                 Impl* self = static_cast<Impl*>(u);
@@ -940,9 +718,13 @@ bool WebRtcPeer::Impl::open(const WebRtcParams& p, const IngestParams& ing, cons
                     }, self, nullptr);
                 g_signal_emit_by_name(webrtc, "create-offer", /*options*/ nullptr, promise);
             }), this);
+    } else {
+        // legacy: kick it off now
+        wrtc_log("legacy path: no on-negotiation-needed -> createOffer()");
+        createOffer();
     }
 
-    // datachannel (optional, early create)
+    // datachannel (optional)
     if (params_.enableDataChannel) {
         wrtc_log("datachannel: creating label='%s'", params_.dataChannelLabel.c_str());
         GstWebRTCDataChannel* dc = nullptr;
@@ -971,7 +753,7 @@ bool WebRtcPeer::Impl::open(const WebRtcParams& p, const IngestParams& ing, cons
         }
     }
 
-    // Start mainloop thread
+    // Start GLib main loop thread
     loop_thread_ = std::thread([this]() {
         wrtc_log("loop thread: start");
         g_main_context_push_thread_default(context_);
@@ -986,17 +768,10 @@ bool WebRtcPeer::Impl::open(const WebRtcParams& p, const IngestParams& ing, cons
         wrtc_log("frame_duration_ns = %lu", (unsigned long)frame_duration_ns_);
     }
 
-    // Legacy path: if no 'on-negotiation-needed', kick off offer creation now.
-    if (!have_neg_needed) {
-        wrtc_log("legacy path: no on-negotiation-needed -> createOffer()");
-        createOffer();
-    }
-
     opened_ = true;
     wrtc_log("open: OK");
     return true;
 }
-
 
 void WebRtcPeer::Impl::close() {
     wrtc_log("close: begin (opened=%d)", (int)opened_.load());
@@ -1016,7 +791,7 @@ void WebRtcPeer::Impl::close() {
         gst_object_unref(pipeline_);
         pipeline_ = nullptr;
     }
-    appsrc_ = conv_ = enc_ = parse_ = pay_ = webrtc_ = nullptr;
+    appsrc_ = parse_ = pay_ = webrtc_ = nullptr;
     data_channel_ = nullptr;
 
     if (context_) {
@@ -1115,54 +890,17 @@ bool WebRtcPeer::Impl::setRemoteDescription(const Sdp& remote) {
     return true;
 }
 
-    bool WebRtcPeer::Impl::addRemoteIceCandidate(const IceCandidate& c) {
+bool WebRtcPeer::Impl::addRemoteIceCandidate(const IceCandidate& c) {
     if (!webrtc_) { wrtc_log("addRemoteIceCandidate: webrtc_ null"); return false; }
     wrtc_log("addRemoteIceCandidate: mline=%d cand_len=%zu", c.sdpMLineIndex, c.candidate.size());
 
-    // End-of-candidates: pass NULL on legacy webrtcbin (empty string can blow up)
+    // End-of-candidates: pass NULL on legacy webrtcbin
     if (c.candidate.empty()) {
         g_signal_emit_by_name(webrtc_, "add-ice-candidate", c.sdpMLineIndex, (const gchar*)nullptr);
         return true;
     }
-
     g_signal_emit_by_name(webrtc_, "add-ice-candidate", c.sdpMLineIndex, c.candidate.c_str());
     return true;
-}
-
-
-bool WebRtcPeer::Impl::pushRawFrame(const cv::Mat& frame, int64_t ptsNs) {
-    if (!opened_ || !appsrc_) return false;
-    if (frame.empty() || frame.type() != CV_8UC3) return false;
-
-    const size_t sz = static_cast<size_t>(frame.total() * frame.elemSize());
-    GstBuffer* buf = gst_buffer_new_and_alloc(sz);
-    if (!buf) return false;
-
-    GstMapInfo map;
-    gst_buffer_map(buf, &map, GST_MAP_WRITE);
-    std::memcpy(map.data, frame.data, sz);
-    gst_buffer_unmap(buf, &map);
-
-    guint64 pts = 0, dur = 0;
-    if (ingest_.useProvidedTimestamps && ptsNs >= 0) {
-        pts = (guint64)ptsNs;
-        dur = (ingest_.framerate > 0) ? frame_duration_ns_ : 0;
-    } else {
-        pts = pts_gen_ns_;
-        dur = frame_duration_ns_;
-        pts_gen_ns_ += dur ? dur : 0;
-    }
-    GST_BUFFER_PTS(buf) = pts;
-    GST_BUFFER_DTS(buf) = GST_CLOCK_TIME_NONE;
-    GST_BUFFER_DURATION(buf) = dur;
-
-    GstFlowReturn ret;
-    g_signal_emit_by_name(appsrc_, "push-buffer", buf, &ret);
-    gst_buffer_unref(buf);
-
-    uint64_t c = ++raw_push_count_;
-    if ((c & 0xFF) == 0) wrtc_log("pushRawFrame: count=%" PRIu64 " last_pts=%" PRIu64 " dur=%" PRIu64 " flow=%d", c, pts, dur, ret);
-    return ret == GST_FLOW_OK;
 }
 
 bool WebRtcPeer::Impl::pushEncoded(VideoCodec codec, const uint8_t* data, size_t bytes, bool keyFrame, int64_t ptsNs) {
@@ -1200,36 +938,33 @@ bool WebRtcPeer::Impl::pushEncoded(VideoCodec codec, const uint8_t* data, size_t
     g_signal_emit_by_name(appsrc_, "push-buffer", buf, &ret);
     gst_buffer_unref(buf);
 
-    uint64_t c = ++enc_push_count_;
-    if ((c & 0xFF) == 0) wrtc_log("pushEncoded: count=%" PRIu64 " key=%d bytes=%zu pts=%" PRIu64 " flow=%d", c, (int)keyFrame, bytes, pts, ret);
+    uint64_t ccount = ++enc_push_count_;
+    if ((ccount & 0xFF) == 0) wrtc_log("pushEncoded: count=%" PRIu64 " key=%d bytes=%zu pts=%" PRIu64 " flow=%d",
+                                       ccount, (int)keyFrame, bytes, pts, ret);
     return ret == GST_FLOW_OK;
 }
 
 void WebRtcPeer::Impl::forceKeyframe() {
-    if (!webrtc_) return;
+    // Best effort: post force-key-unit upstream to payloader sink (propagates back)
+    if (!pay_) return;
     wrtc_log("forceKeyframe: posting upstream event");
     GstStructure* s = gst_structure_new("GstForceKeyUnit",
                                         "all-headers", G_TYPE_BOOLEAN, TRUE,
                                         "count",       G_TYPE_UINT, 0,
                                         NULL);
     GstEvent* ev = gst_event_new_custom(GST_EVENT_CUSTOM_UPSTREAM, s);
-    if (pay_) {
-        GstPad* sink = gst_element_get_static_pad(pay_, "sink");
-        if (sink) {
-            gst_pad_send_event(sink, ev);
-            gst_object_unref(sink);
-            return;
-        }
+    GstPad* sink = gst_element_get_static_pad(pay_, "sink");
+    if (sink) {
+        gst_pad_send_event(sink, ev);
+        gst_object_unref(sink);
+    } else {
+        gst_event_unref(ev);
     }
-    gst_event_unref(ev);
 }
 
 void WebRtcPeer::Impl::setTargetBitrate(int bps) {
-    wrtc_log("setTargetBitrate: %d", bps);
-    if (enc_) {
-        g_object_set(enc_, "bitrate", bps, nullptr);
-        if (bps >= 1000) g_object_set(enc_, "bitrate", bps / 1000, nullptr);
-    }
+    // No encoder in this path. You should reconfigure your upstream encoder.
+    wrtc_log("setTargetBitrate(%d): no-op (encoded-only path; adjust upstream encoder)", bps);
 }
 
 void WebRtcPeer::Impl::setFramerate(int fps) {
@@ -1309,7 +1044,6 @@ bool WebRtcPeer::createAnswer() { return pimpl->createAnswer(); }
 bool WebRtcPeer::setRemoteDescription(const Sdp& remote) { return pimpl->setRemoteDescription(remote); }
 bool WebRtcPeer::addRemoteIceCandidate(const IceCandidate& cand) { return pimpl->addRemoteIceCandidate(cand); }
 
-bool WebRtcPeer::pushRawFrame(const cv::Mat& frame, int64_t ptsNs) { return pimpl->pushRawFrame(frame, ptsNs); }
 bool WebRtcPeer::pushEncoded(VideoCodec codec, const uint8_t* data, size_t bytes, bool keyFrame, int64_t ptsNs) {
     return pimpl->pushEncoded(codec, data, bytes, keyFrame, ptsNs);
 }

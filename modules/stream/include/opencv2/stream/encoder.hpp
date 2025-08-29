@@ -31,11 +31,33 @@ namespace stream {
 struct CV_EXPORTS_W EncoderParams {
     CV_WRAP EncoderParams();
 
-    CV_PROP_RW int width = 0;
-    CV_PROP_RW int height = 0;
-    CV_PROP_RW int bitrate = 0;      // bits/sec
+    // Frame geometry and rate
+    CV_PROP_RW int width     = 0;
+    CV_PROP_RW int height    = 0;
+    CV_PROP_RW int bitrate   = 0;    // bits/sec
     CV_PROP_RW int framerate = 0;    // fps
-    CV_PROP_RW int gopSize = 0;      // keyframe interval
+    CV_PROP_RW int gopSize   = 0;    // keyframe interval (~seconds = gopSize/framerate)
+
+    // Latency / GOP structure
+    // Set maxBFrames=0 for strictly forward-decoded streams (recommended for real-time/WebRTC).
+    CV_PROP_RW int  maxBFrames  = 0;     // default 0 (no B-frames)
+    CV_PROP_RW bool lowLatency  = true;  // apply encoder-specific low-latency presets/tunes when available
+
+    // Optional encoder “hints” (mapped to FFmpeg private options when applicable).
+    // Examples:
+    //   - H.264 (x264): profile="baseline", preset="ultrafast", tune="zerolatency"
+    //   - H.264 (NVENC): preset="llhp", profile="high", and still set maxBFrames=0
+    //   - VP8/AV1: may ignore profile/preset/tune
+    CV_PROP_RW std::string profile;      // e.g. "baseline", "main", "high"
+    CV_PROP_RW std::string preset;       // e.g. "ultrafast", "veryfast", "llhq", "llhp"
+    CV_PROP_RW std::string tune;         // e.g. "zerolatency"
+
+    // Extra encoder-specific private options (key/value), applied last and override above if overlapping.
+    // Examples:
+    //   codecOptions["bf"] = "0";            // NVENC max B-frames
+    //   codecOptions["rc-lookahead"] = "0";  // NVENC/x264 reduce lookahead
+    //   codecOptions["no-scenecut"] = "1";   // x264
+    CV_PROP_RW std::map<std::string, std::string> codecOptions;
 
     // Name of the FFmpeg encoder to use. Must resolve to H.264, VP8, or AV1.
     // Examples:
@@ -92,7 +114,9 @@ public:
     CV_WRAP bool push(const cv::Mat& frame);
 
     // Streaming egress:
-    //  - pullAsRtp: raw encoded packets (e.g., H.264 NAL units) for RTP/WebRTC.
+    //  - pullAsRtp: returns pre-encoded access units/packets suitable for RTP/WebRTC.
+    //      * H.264: Annex-B bytestream (AU-aligned, start codes present).
+    //      * VP8/AV1: codec-native frames (no container).
     //  - getFmp4InitializationSegment / pullAsFmp4: init + fragments for MSE over WebSockets.
     bool pullAsRtp(std::vector<uint8_t>& packet);
     bool getFmp4InitializationSegment(std::vector<uint8_t>& initSegment);

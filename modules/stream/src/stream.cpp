@@ -52,11 +52,10 @@ public:
     void enableRootIndex(bool on, const std::string& mount, const std::string& title);
 
     // endpoints
-    EndpointHandle addRaw(const std::string& path, const FrameSource& src, const RawOptions& opts);
+    EndpointHandle addRaw (const std::string& path, const FrameSource& src, const RawOptions& opts);
     EndpointHandle addFmp4(const std::string& path, const FrameSource& src, const Fmp4Options& opts);
 #if defined(HAVE_STREAM_WEBRTC_GSTREAMER)
     EndpointHandle addWebRtc(const std::string& path, const EncodedSource& encoded, const WebRtcOptions& opts);
-    EndpointHandle addWebRtcRaw(const std::string& path, const FrameSource& raw, const WebRtcOptions& opts);
 #endif
     void remove(const EndpointHandle& h);
     void removeByPath(const std::string& path);
@@ -128,8 +127,8 @@ private:
         mutable std::mutex sessMtx;
 
         // sources
-        FrameSource   rawSource;
-        EncodedSource encSource;
+        FrameSource   rawSource;  // used by Raw and Fmp4 endpoints
+        EncodedSource encSource;  // used by WebRTC (encoded-only)
 
         // encoder / recording (fMP4)
 #if defined(HAVE_STREAM_COMPRESSION)
@@ -177,7 +176,7 @@ private:
     void attachRawWS (Endpoint& ep);
     void attachFmp4WS(Endpoint& ep);
 #if defined(HAVE_STREAM_WEBRTC_GSTREAMER)
-    void attachWebRtcWS(const WebRtcOptions& opts, const EncodedSource* enc, const FrameSource* raw, Endpoint& ep);
+    void attachWebRtcWS(const WebRtcOptions& opts, const EncodedSource& enc, Endpoint& ep);
 #endif
 
     void ensureRootPage();
@@ -671,29 +670,7 @@ EndpointHandle Stream::Impl::addWebRtc(const std::string& path, const EncodedSou
     ep->editor = false; // no auto UI controls for WebRTC at this layer
     ep->encSource = encoded;
 
-    attachWebRtcWS(opts, &ep->encSource, /*raw*/NULL, *ep);
-
-    int id;
-    { std::lock_guard<std::mutex> lock(epMtx);
-      id = nextId++; byId[id] = ep; byPath[path] = id; }
-
-    if (!secure && opts.title.size()) {
-        WebviewOptions v; v.videoClient = webpage::VideoClient::WebRTC; v.title = opts.title;
-        mountEmbedded(path + "/view", path, v);
-    }
-    return EndpointHandle(id);
-}
-
-EndpointHandle Stream::Impl::addWebRtcRaw(const std::string& path, const FrameSource& raw, const WebRtcOptions& opts) {
-    if (!srv) CV_Error(cv::Error::StsError, "Server not started");
-
-    std::shared_ptr<Endpoint> ep(new Endpoint());
-    ep->kind = EndpointKind::WebRTC;
-    ep->path = path;
-    ep->editor = false;
-    ep->rawSource = raw;
-
-    attachWebRtcWS(opts, /*enc*/NULL, &ep->rawSource, *ep);
+    attachWebRtcWS(opts, ep->encSource, *ep);
 
     int id;
     { std::lock_guard<std::mutex> lock(epMtx);
@@ -742,13 +719,26 @@ void Stream::Impl::removeByPath(const std::string& path) {
 
 void Stream::Impl::attachRawWS(Endpoint& ep) {
     WebSocketHandler h;
+
     h.onOpen = [this,&ep](WebSocketSession& s) {
-        SessionCtx ctx; ctx.ws = &s; ctx.authed = false; ctx.role = AccessRole::ReadOnly;
+        SessionCtx ctx; ctx.ws = &s; ctx.role = AccessRole::ReadOnly;
+        if (!secure) {
+            // Lab mode: auto-auth immediately
+            ctx.authed = true;
+            const char ok[] = "OK";
+            s.send(ok, sizeof(ok)-1, /*binary=*/false);
+            std::fprintf(stderr, "[raw] open %s (lab) -> authed\n", s.remoteAddress().c_str());
+        } else {
+            ctx.authed = false;
+            std::fprintf(stderr, "[raw] open %s (secure) -> awaiting token\n", s.remoteAddress().c_str());
+        }
         std::lock_guard<std::mutex> lk(ep.sessMtx);
         ep.sessions.push_back(ctx);
     };
+
     h.onMessage = [this,&ep](WebSocketSession& s, const uint8_t* data, size_t n, bool /*binary*/) {
-        // Token handshake: first message must be ASCII "T <token>"
+        // Token handshake: first message must be ASCII "T <token>" (secure mode only)
+        if (!secure) return; // already authed in lab mode
         std::string msg(reinterpret_cast<const char*>(data), reinterpret_cast<const char*>(data)+n);
         std::lock_guard<std::mutex> lk(ep.sessMtx);
         for (auto& it : ep.sessions) if (it.ws == &s) {
@@ -759,37 +749,57 @@ void Stream::Impl::attachRawWS(Endpoint& ep) {
                     std::lock_guard<std::mutex> g(ep.gateMtx);
                     dropExpiredTokens(ep);
                     AccessRole role;
-                    if (!secure || tokenAllowed(ep, tok, &role)) {
-                        it.authed = true; it.role = secure ? role : AccessRole::ReadOnly;
-                        // ack
-                        const char* ok = "OK";
-                        s.send(ok, 2, false);
+                    if (tokenAllowed(ep, tok, &role)) {
+                        it.authed = true; it.role = role;
+                        const char ok[] = "OK";
+                        s.send(ok, sizeof(ok)-1, false);
+                        std::fprintf(stderr, "[raw] %s authed (secure)\n", s.remoteAddress().c_str());
                     } else {
                         s.close(WsCloseCode::PolicyViolation, "unauthorized");
+                        std::fprintf(stderr, "[raw] %s unauthorized (secure)\n", s.remoteAddress().c_str());
                     }
                 }
             }
             break;
         }
     };
+
     h.onClose = [this,&ep](WebSocketSession& s, int /*code*/, const std::string& /*reason*/) {
         std::lock_guard<std::mutex> lk(ep.sessMtx);
         std::vector<SessionCtx> keep;
         for (auto& it : ep.sessions) if (it.ws != &s) keep.push_back(it);
         ep.sessions.swap(keep);
     };
+
     srv->registerWebSocketEndpoint(ep.path, h);
 }
 
 void Stream::Impl::attachFmp4WS(Endpoint& ep) {
     WebSocketHandler h;
+
     h.onOpen = [this,&ep](WebSocketSession& s) {
-        SessionCtx ctx; ctx.ws = &s; ctx.authed = false; ctx.role = AccessRole::ReadOnly; ctx.fmp4InitSent = false;
+        SessionCtx ctx; ctx.ws = &s; ctx.role = AccessRole::ReadOnly; ctx.fmp4InitSent = false;
+        if (!secure) {
+            // Lab mode: auto-auth + send init if available
+            ctx.authed = true;
+            const char ok[] = "OK";
+            s.send(ok, sizeof(ok)-1, /*binary=*/false);
+            if (!ep.fmp4Init.empty()) {
+                s.send(ep.fmp4Init.data(), ep.fmp4Init.size(), /*binary=*/true);
+                ctx.fmp4InitSent = true;
+            }
+            std::fprintf(stderr, "[fmp4] open %s (lab) -> authed (initSent=%d)\n",
+                         s.remoteAddress().c_str(), (int)ctx.fmp4InitSent);
+        } else {
+            ctx.authed = false;
+            std::fprintf(stderr, "[fmp4] open %s (secure) -> awaiting token\n", s.remoteAddress().c_str());
+        }
         std::lock_guard<std::mutex> lk(ep.sessMtx);
         ep.sessions.push_back(ctx);
     };
+
     h.onMessage = [this,&ep](WebSocketSession& s, const uint8_t* data, size_t n, bool /*binary*/) {
-        // Token handshake
+        if (!secure) return; // already authed in lab mode
         std::string msg(reinterpret_cast<const char*>(data), reinterpret_cast<const char*>(data)+n);
         std::lock_guard<std::mutex> lk(ep.sessMtx);
         for (auto& it : ep.sessions) if (it.ws == &s) {
@@ -800,37 +810,42 @@ void Stream::Impl::attachFmp4WS(Endpoint& ep) {
                     std::lock_guard<std::mutex> g(ep.gateMtx);
                     dropExpiredTokens(ep);
                     AccessRole role;
-                    if (!secure || tokenAllowed(ep, tok, &role)) {
-                        it.authed = true; it.role = secure ? role : AccessRole::ReadOnly;
-                        // send init if cached
-                        if (!ep.fmp4Init.empty()) {
+                    if (tokenAllowed(ep, tok, &role)) {
+                        it.authed = true; it.role = role;
+                        if (!ep.fmp4Init.empty() && !it.fmp4InitSent) {
                             it.ws->send(ep.fmp4Init.data(), ep.fmp4Init.size(), true);
                             it.fmp4InitSent = true;
                         }
-                        const char* ok = "OK";
-                        s.send(ok, 2, false);
+                        const char ok[] = "OK";
+                        s.send(ok, sizeof(ok)-1, false);
+                        std::fprintf(stderr, "[fmp4] %s authed (secure)\n", s.remoteAddress().c_str());
                     } else {
                         s.close(WsCloseCode::PolicyViolation, "unauthorized");
+                        std::fprintf(stderr, "[fmp4] %s unauthorized (secure)\n", s.remoteAddress().c_str());
                     }
                 }
             }
             break;
         }
     };
+
     h.onClose = [this,&ep](WebSocketSession& s, int /*code*/, const std::string& /*reason*/) {
         std::lock_guard<std::mutex> lk(ep.sessMtx);
         std::vector<SessionCtx> keep;
         for (auto& it : ep.sessions) if (it.ws != &s) keep.push_back(it);
         ep.sessions.swap(keep);
     };
+
     srv->registerWebSocketEndpoint(ep.path, h);
 }
 
 #if defined(HAVE_STREAM_WEBRTC_GSTREAMER)
-void Stream::Impl::attachWebRtcWS(const WebRtcOptions& opts, const EncodedSource* enc, const FrameSource* raw, Endpoint& ep) {
+void Stream::Impl::attachWebRtcWS(const WebRtcOptions& opts,
+                                  const EncodedSource& enc,
+                                  Endpoint& ep)
+{
     WebSocketHandler h;
 
-    // Per-WS peer state (one peer per signaling session).
     struct PeerState {
         std::unique_ptr<WebRtcPeer> peer;
         std::thread worker;
@@ -838,94 +853,125 @@ void Stream::Impl::attachWebRtcWS(const WebRtcOptions& opts, const EncodedSource
         bool authed = false;
         AccessRole role = AccessRole::ReadOnly;
     };
-    // Keep small map in endpoint (session* -> state)
-    std::unordered_map<WebSocketSession*, std::shared_ptr<PeerState> > peers;
-    std::mutex peersMtx;
 
-    h.onOpen = [&ep,&peers,&peersMtx](WebSocketSession& s) {
-        auto st = std::shared_ptr<PeerState>(new PeerState());
-        std::lock_guard<std::mutex> lk(peersMtx);
-        peers[&s] = st;
-        // token gating will happen on first message
+    // Lifetime must outlive this function and captured lambdas
+    auto peers    = std::make_shared<
+        std::unordered_map<WebSocketSession*, std::shared_ptr<PeerState>>>();
+    auto peersMtx = std::make_shared<std::mutex>();
+
+    // Keep a copy of options alive for lambdas
+    auto optsPtr = std::make_shared<WebRtcOptions>(opts);
+
+    // helper to bootstrap a peer once authenticated
+    auto begin_peer = [optsPtr,&enc](std::shared_ptr<PeerState> st, WebSocketSession& s) {
+        st->peer = createWebRtcPeer();
+
+        WebRtcCallbacks cb;
+        cb.onLocalDescription = [&s](const Sdp& local) {
+            const std::string json = makeSdpJson(local);
+            s.send(json.data(), json.size(), /*binary=*/false);
+        };
+        cb.onIceCandidate = [&s](const IceCandidate& ic) {
+            const std::string json = makeIceJson(ic);
+            s.send(json.data(), json.size(), /*binary=*/false);
+        };
+        cb.onError = [&s](const char* where, int err) {
+            std::ostringstream os; os << "{\"error\":\"" << where << "\",\"code\":" << err << "}";
+            const std::string js = os.str();
+            s.send(js.data(), js.size(), false);
+        };
+
+        // Open peer with provided (encoded-only) ingest options.
+        if (!st->peer->open(optsPtr->webrtc, optsPtr->ingest, cb)) {
+            const char* er = "{\"error\":\"build-pipeline\",\"code\":-1}";
+            s.send(er, std::strlen(er), /*binary=*/false);
+            s.close(WsCloseCode::InternalError, "webrtc open failed");
+            return;
+        }
+
+        if (optsPtr->autostartOffer) st->peer->createOffer();
+
+        // Worker: pull pre-encoded AUs/OBUs and push into WebRTC
+        st->run = true;
+        st->worker = std::thread([st,&enc]() {
+            // Use the codec selected by the peer (driven by webrtc params)
+            // This is decided during pipeline build (first preferred match).
+            auto selected_codec = st->peer ? st->peer->getNegotiatedVideoCodec() : VideoCodec::H264;
+
+            while (st->run) {
+                std::vector<uint8_t> au; bool key = false; int64_t pts = -1;
+                if (!enc(au, key, pts)) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(2));
+                    continue;
+                }
+                if (st->peer) {
+                    st->peer->pushEncoded(selected_codec, au.data(), au.size(), key, pts);
+                }
+            }
+        });
     };
 
-    h.onMessage = [this,&ep,&peers,&peersMtx,&opts,enc,raw](WebSocketSession& s, const uint8_t* data, size_t n, bool /*binary*/) {
-        std::string msg(reinterpret_cast<const char*>(data), reinterpret_cast<const char*>(data)+n);
+    // capture begin_peer **by value** (copy), not by reference
+    h.onOpen = [this,&ep,peers,peersMtx,begin_peer](WebSocketSession& s) {
+        auto st = std::make_shared<PeerState>();
+        {
+            std::lock_guard<std::mutex> lk(*peersMtx);
+            (*peers)[&s] = st;
+        }
+
+        if (!secure) {
+            st->authed = true;
+            const char ok[] = "OK";
+            s.send(ok, sizeof(ok)-1, /*binary=*/false);
+            std::fprintf(stderr, "[webrtc] open %s (lab) -> authed\n", s.remoteAddress().c_str());
+            begin_peer(st, s);
+        } else {
+            std::fprintf(stderr, "[webrtc] open %s (secure) -> awaiting token/SDP\n", s.remoteAddress().c_str());
+        }
+    };
+
+    h.onMessage = [this,&ep,peers,peersMtx,begin_peer](WebSocketSession& s,
+                                                       const uint8_t* data, size_t n, bool /*binary*/) {
+        const std::string msg(reinterpret_cast<const char*>(data),
+                              reinterpret_cast<const char*>(data) + n);
 
         std::shared_ptr<PeerState> st;
-        { std::lock_guard<std::mutex> lk(peersMtx);
-          auto it = peers.find(&s); if (it != peers.end()) st = it->second; }
+        {
+            std::lock_guard<std::mutex> lk(*peersMtx);
+            auto it = peers->find(&s);
+            if (it != peers->end()) st = it->second;
+        }
         if (!st) return;
 
         if (!st->authed) {
             std::string tok;
-            if (msg.size() > 2 && msg[0]=='T' && msg[1]==' ') tok = msg.substr(2);
+            if (msg.size() > 2 && msg[0] == 'T' && msg[1] == ' ') tok = msg.substr(2);
+
             {
                 std::lock_guard<std::mutex> g(ep.gateMtx);
                 dropExpiredTokens(ep);
                 AccessRole role;
                 if (!secure || tokenAllowed(ep, tok, &role)) {
-                    st->authed = true; st->role = secure ? role : AccessRole::ReadOnly;
-                    const char* ok = "OK"; s.send(ok, 2, false);
-
-                    // Create peer now
-                    st->peer = createWebRtcPeer();
-                    WebRtcCallbacks cb;
-                    cb.onLocalDescription = [&s](const Sdp& local) {
-                        std::string json = makeSdpJson(local);
-                        s.send(json.data(), json.size(), /*binary=*/false);
-                    };
-                    cb.onIceCandidate = [&s](const IceCandidate& ic) {
-                        std::string json = makeIceJson(ic);
-                        s.send(json.data(), json.size(), /*binary=*/false);
-                    };
-                    cb.onError = [&s](const char* where, int err) {
-                        std::ostringstream os; os << "{\"error\":\"" << where << "\"," << "\"code\":" << err << "}";
-                        const std::string js = os.str();
-                        s.send(js.data(), js.size(), false);
-                    };
-
-                    if (!st->peer->open(opts.webrtc, opts.ingest, cb)) {
-                        s.close(WsCloseCode::InternalError, "webrtc open failed");
-                        return;
-                    }
-                    if (opts.autostartOffer) st->peer->createOffer();
-
-                    // media worker
-                    st->run = true;
-                    if (enc) {
-                        st->worker = std::thread([st,enc]() {
-                            while (st->run) {
-                                std::vector<uint8_t> au; bool key=false; int64_t pts=-1;
-                                if (!(*enc)(au, key, pts)) { std::this_thread::sleep_for(std::chrono::milliseconds(2)); continue; }
-                                if (st->peer) st->peer->pushEncoded(VideoCodec::H264, au.data(), au.size(), key, pts);
-                            }
-                        });
-                    } else if (raw) {
-                        st->worker = std::thread([st,raw]() {
-                            while (st->run) {
-                                cv::Mat f; int64_t pts=-1;
-                                if (!(*raw)(f, pts) || f.empty()) { std::this_thread::sleep_for(std::chrono::milliseconds(2)); continue; }
-                                if (st->peer) st->peer->pushRawFrame(f, pts);
-                            }
-                        });
-                    }
+                    st->authed = true;
+                    st->role = secure ? role : AccessRole::ReadOnly;
+                    const char ok[] = "OK";
+                    s.send(ok, sizeof(ok)-1, false);
+                    std::fprintf(stderr, "[webrtc] %s authed (secure)\n", s.remoteAddress().c_str());
+                    begin_peer(st, s);
                 } else {
                     s.close(WsCloseCode::PolicyViolation, "unauthorized");
+                    std::fprintf(stderr, "[webrtc] %s unauthorized (secure)\n", s.remoteAddress().c_str());
                 }
             }
             return;
         }
 
-        // After auth: SDP/ICE messages as JSON
+        // after auth: SDP/ICE as JSON strings
         Sdp sdp;
         IceCandidate ice;
         if (parseSdpFromJson(msg, sdp)) {
             if (st->peer) {
                 st->peer->setRemoteDescription(sdp);
-                // If remote was an offer and autostartOffer==false, app can call createAnswer via client msg,
-                // but we auto-answer here if type==offer.
-                if (sdp.type == "offer") st->peer->createAnswer();
             }
             return;
         }
@@ -933,26 +979,30 @@ void Stream::Impl::attachWebRtcWS(const WebRtcOptions& opts, const EncodedSource
             if (st->peer) st->peer->addRemoteIceCandidate(ice);
             return;
         }
-        // Unknown message ignored.
     };
 
-    h.onClose = [&peers,&peersMtx](WebSocketSession& s, int /*code*/, const std::string& /*reason*/) {
+    h.onClose = [peers,peersMtx](WebSocketSession& s, int /*code*/, const std::string& /*reason*/) {
         std::shared_ptr<PeerState> st;
         {
-            std::lock_guard<std::mutex> lk(peersMtx);
-            auto it = peers.find(&s); if (it != peers.end()) { st = it->second; peers.erase(it); }
+            std::lock_guard<std::mutex> lk(*peersMtx);
+            auto it = peers->find(&s);
+            if (it != peers->end()) {
+                st = it->second;
+                peers->erase(it);
+            }
         }
         if (st) {
             st->run = false;
             if (st->worker.joinable()) st->worker.join();
             if (st->peer) st->peer->close();
-            st.reset();
         }
     };
 
     srv->registerWebSocketEndpoint(ep.path, h);
 }
 #endif
+
+
 
 // ============================================================================
 // Impl: web pages
@@ -1083,10 +1133,6 @@ EndpointHandle Stream::addFmp4(const std::string& path, const FrameSource& src, 
 EndpointHandle Stream::addWebRtc(const std::string& path, const EncodedSource& encoded, const WebRtcOptions& opts) {
     if (!pimpl) return EndpointHandle();
     return pimpl->addWebRtc(path, encoded, opts);
-}
-EndpointHandle Stream::addWebRtcRaw(const std::string& path, const FrameSource& raw, const WebRtcOptions& opts) {
-    if (!pimpl) return EndpointHandle();
-    return pimpl->addWebRtcRaw(path, raw, opts);
 }
 #endif
 

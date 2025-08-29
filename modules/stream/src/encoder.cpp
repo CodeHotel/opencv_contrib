@@ -175,10 +175,38 @@ bool Encoder::EncoderImpl::setup_codec_context() {
     codec_ctx->height = current_params.height;
     codec_ctx->time_base = {1, current_params.framerate > 0 ? current_params.framerate : 30};
     codec_ctx->gop_size = current_params.gopSize > 0 ? current_params.gopSize : 12;
-    codec_ctx->pix_fmt = AV_PIX_FMT_YUV420P; // Most common for H.264/VP8
+    codec_ctx->pix_fmt = AV_PIX_FMT_YUV420P;
 
-    // Open the codec
-    if (avcodec_open2(codec_ctx, codec, nullptr) < 0) {
+    // ==== IMPORTANT: Disable B-frames to prevent decode reordering (rev-back effect) ====
+    codec_ctx->max_b_frames = 0;                 // generic way for most encoders
+    codec_ctx->flags       |= AV_CODEC_FLAG_LOW_DELAY; // hint low-latency if supported
+    // =====================================================================================
+
+    // Prepare encoder-specific options (safe defaults)
+    AVDictionary* opts = nullptr;
+    av_dict_set(&opts, "bf", "0", 0);  // many encoders (x264, nvenc, qsv, vaapi) honor this
+
+    // Optional low-latency hints (ignored if unsupported; harmless):
+    if (codec && codec->name) {
+        std::string name(codec->name);
+        if (name.find("libx264") != std::string::npos) {
+            av_dict_set(&opts, "tune", "zerolatency", 0);
+            av_dict_set(&opts, "b-pyramid", "none", 0);
+            // You could also set "rc-lookahead=0" via x264-params but not required here.
+        } else if (name.find("nvenc") != std::string::npos) {
+            av_dict_set(&opts, "rc-lookahead", "0", 0);
+            // nvenc default bf is often 0 for ll presets, but we force it above anyway.
+        } else if (name.find("qsv") != std::string::npos) {
+            // qsv also honors bf=0, nothing extra needed.
+        } else if (name.find("vaapi") != std::string::npos) {
+            // h264_vaapi honors bf=0 too.
+        }
+    }
+
+    // Open the codec (with options)
+    int open_ret = avcodec_open2(codec_ctx, codec, &opts);
+    av_dict_free(&opts);
+    if (open_ret < 0) {
         return false;
     }
 

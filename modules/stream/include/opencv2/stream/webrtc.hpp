@@ -3,7 +3,6 @@
 #define OPENCV_WEBRTC_HPP
 
 #include "opencv2/core/cvdef.h"
-#include <opencv2/core/mat.hpp>
 #include <cstdint>
 #include <functional>
 #include <map>
@@ -36,10 +35,8 @@ struct CV_EXPORTS_W IceServer {
     CV_PROP_RW std::string credential;
 };
 
-enum class IngestMode {
-    AutoEncodeRawBGR,   // feed cv::Mat; module encodes internally
-    PreEncodedElementary // feed encoded AUs/OBUs (H.264/VP8/AV1)
-};
+// In this variant, ONLY pre-encoded elementary streams are accepted.
+// Raw frame ingestion is intentionally not supported.
 
 enum class VideoCodec {
     H264,
@@ -64,6 +61,7 @@ struct CV_EXPORTS_W WebRtcParams {
           enableDataChannel(false),
           dataChannelLabel("cv")
     {
+        // negotiation preference (first match wins)
         preferredCodecs.push_back(VideoCodec::H264);
         preferredCodecs.push_back(VideoCodec::VP8);
         preferredCodecs.push_back(VideoCodec::AV1);
@@ -92,18 +90,16 @@ struct CV_EXPORTS_W WebRtcParams {
     CV_PROP_RW size_t maxQueueBytes = 4 * 1024 * 1024;
 };
 
+// Pre-encoded ingest only. Supply codec-specific AUs/OBUs via pushEncoded(...).
+// Width/height are derived from the bitstream; not required here.
 struct CV_EXPORTS_W IngestParams {
     CV_WRAP IngestParams()
-        : mode(IngestMode::PreEncodedElementary),
-          width(0), height(0), framerate(0),
-          useProvidedTimestamps(false)
+        : framerate(0), useProvidedTimestamps(false)
     {}
 
-    CV_PROP_RW IngestMode mode;
-    CV_PROP_RW int width;
-    CV_PROP_RW int height;
-    CV_PROP_RW int framerate;             // fps; used for pacing if timestamps not provided
-    CV_PROP_RW bool useProvidedTimestamps; // ns (monotonic); if false, timestamps are generated
+    // Used only if pts are not provided when pushing AUs (simple pacing).
+    CV_PROP_RW int  framerate;              // fps; 0 = do not pace
+    CV_PROP_RW bool useProvidedTimestamps;  // pts are ns (monotonic). If false and framerate>0, pts are generated.
 };
 
 // --- Callbacks ---------------------------------------------------------------
@@ -142,18 +138,22 @@ public:
     CV_WRAP bool setRemoteDescription(const Sdp& remote);
     CV_WRAP bool addRemoteIceCandidate(const IceCandidate& cand);
 
-    // ingest
-    CV_WRAP bool pushRawFrame(const cv::Mat& frame, int64_t ptsNs = -1); // BGR
+    // ingest (PRE-ENCODED ONLY)
+    // Provide codec elementary units:
+    //  - H.264: Annex-B AU (start-code delimited), keyFrame=true on IDR
+    //  - VP8: full encoded frame payload
+    //  - AV1: OBUs for a frame (Annex-B or length-delimited accepted by implementation)
     CV_WRAP bool pushEncoded(VideoCodec codec,
                              const uint8_t* data, size_t bytes,
                              bool keyFrame, int64_t ptsNs = -1);
+
     // convenience for H.264 byte-stream (Annex-B) AUs
     CV_WRAP bool pushH264(const uint8_t* data, size_t bytes, bool keyFrame, int64_t ptsNs = -1);
 
     // control
-    CV_WRAP void forceKeyframe();
+    CV_WRAP void forceKeyframe();           // sends FIR/PLI to upstream encoder
     CV_WRAP void setTargetBitrate(int bps);
-    CV_WRAP void setFramerate(int fps);
+    CV_WRAP void setFramerate(int fps);     // pacing hint if pts are not provided
     CV_WRAP void setWriteQueueLimitBytes(size_t bytes);
 
     // datachannel
