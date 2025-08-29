@@ -201,6 +201,16 @@ int main() {
     }
 
     if (ok.load()) {
+        // Close client first so the WS session winds down cleanly
+        client->close();
+        {
+            std::unique_lock<std::mutex> lk(mx);
+            cv_.wait_for(lk, std::chrono::milliseconds(500), [&]{ return done.load(); });
+        }
+
+        // Then stop the server explicitly
+        server->stop();
+
         std::cout << "[PASS] WebSocket round-trip 0..10 -> 1..11 verified\n";
         std::cout << "Shutting down server and client..\n";
         return 0;
