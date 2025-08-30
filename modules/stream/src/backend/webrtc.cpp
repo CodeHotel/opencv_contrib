@@ -433,8 +433,15 @@ bool WebRtcPeer::Impl::buildPipeline() {
     if (!appsrc_) return fail("make-appsrc");
 
     wrtc_log("appsrc: created");
-    g_object_set(appsrc_, "is-live", TRUE, "format", GST_FORMAT_TIME, "block", FALSE, nullptr);
-    if (params_.maxQueueBytes > 0) g_object_set(appsrc_, "max-bytes", (guint64)params_.maxQueueBytes, nullptr);
+    g_object_set(appsrc_,
+        "is-live", TRUE,
+        "format", GST_FORMAT_TIME,
+        "block", TRUE,
+        "max-buffers", 2,
+        "max-bytes", (guint64)(params_.maxQueueBytes ? params_.maxQueueBytes : (1u<<20)),
+        "max-time", (gint64)0,
+        nullptr);
+    if (!ingest_.useProvidedTimestamps) g_object_set(appsrc_, "do-timestamp", TRUE, nullptr);
 
     negotiatedCodec_ = selectCodec(params_);
     wrtc_log("negotiated codec preference = %s", toString(negotiatedCodec_));
@@ -473,28 +480,46 @@ bool WebRtcPeer::Impl::buildPipeline() {
     // Some versions of webrtcbin behave better if pipeline is READY before pad requests
     gst_element_set_state(pipeline_, GST_STATE_READY);
 
+    GstElement* q = gst_element_factory_make("queue", "q_pay");
+    if (!q) return fail("make-queue");
+    g_object_set(q,
+        "leaky", 2,                 // downstream (drop oldest)
+        "max-size-buffers", 1,
+        "max-size-bytes", 0,
+        "max-size-time", 0,
+        nullptr);
+    gst_bin_add(GST_BIN(pipeline_), q);
+
     if (parse_) {
-        wrtc_log("link: appsrc -> parse -> pay");
-        if (!gst_element_link(appsrc_, parse_)) return fail("link-appsrc-parse");
-        if (!gst_element_link(parse_,  pay_ ))  return fail("link-parse-pay");
+        wrtc_log("link: appsrc -> parse -> q -> pay");
+        if (!gst_element_link_many(appsrc_, parse_, q, pay_, nullptr)) return fail("link-appsrc-parse-q-pay");
     } else {
-        wrtc_log("link: appsrc -> pay");
-        if (!gst_element_link(appsrc_, pay_))   return fail("link-appsrc-pay");
+        wrtc_log("link: appsrc -> q -> pay");
+        if (!gst_element_link_many(appsrc_, q, pay_, nullptr)) return fail("link-appsrc-q-pay");
     }
+
 
     if (!linkRtpToWebrtc()) return fail("link-pay-webrtc");
 
-    // Legacy-safe MTU + ICE
+    /* MTU + latency + ICE */
     if (params_.mtu > 0 && has_prop(G_OBJECT(webrtc_), "mtu")) {
         wrtc_log("webrtcbin: set mtu=%d", params_.mtu);
         g_object_set(webrtc_, "mtu", params_.mtu, nullptr);
     } else if (params_.mtu > 0) {
         wrtc_log("webrtcbin: 'mtu' property not present (legacy)");
     }
+    if (has_prop(G_OBJECT(webrtc_), "latency")) {
+        g_object_set(webrtc_, "latency", 50, nullptr); // try 20–80
+    }
     if (!params_.iceServers.empty()) {
         wrtc_log("webrtcbin: configuring %zu ICE server(s)", params_.iceServers.size());
         configureIceServers(webrtc_, params_.iceServers);
     }
+    /* payloader MTU (if supported) */
+    if (has_prop(G_OBJECT(pay_), "mtu")) {
+        g_object_set(pay_, "mtu", params_.mtu > 0 ? params_.mtu : 1200, nullptr);
+    }
+
 
     // Bus watch
     GstBus* bus = gst_pipeline_get_bus(GST_PIPELINE(pipeline_));

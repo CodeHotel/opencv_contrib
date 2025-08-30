@@ -1,5 +1,5 @@
-// stream.cpp
-#include <opencv2/stream/stream.hpp>
+// stream_helper.cpp
+#include <opencv2/stream/stream_helper.hpp>
 
 #include <opencv2/core.hpp>
 #include <opencv2/core/utils/logger.hpp>   // << Logging
@@ -79,10 +79,10 @@ static inline int64_t nowNs() {
 }
 
 // ============================================================================
-// Stream::Impl
+// StreamHelper::Impl
 // ============================================================================
 
-class Stream::Impl {
+class StreamHelper::Impl {
 public:
     Impl()
         : secure(false),
@@ -252,7 +252,7 @@ private:
 // Impl: server lifecycle
 // ============================================================================
 
-bool Stream::Impl::start(const std::string& /*bindAddress*/, int port, bool secureMode, int numThreads) {
+bool StreamHelper::Impl::start(const std::string& /*bindAddress*/, int port, bool secureMode, int numThreads) {
     TraceScope ts("Stream::Impl::start",
         (std::ostringstream() << "port=" << port << " secureMode=" << (int)secureMode
                               << " threads=" << numThreads).str());
@@ -283,7 +283,7 @@ bool Stream::Impl::start(const std::string& /*bindAddress*/, int port, bool secu
     return true;
 }
 
-void Stream::Impl::stop() {
+void StreamHelper::Impl::stop() {
     TraceScope ts("Stream::Impl::stop");
     if (!running) {
         CV_LOG_VERBOSE(kTag, 4, "Not running; nothing to stop.");
@@ -314,7 +314,7 @@ void Stream::Impl::stop() {
     CV_LOG_INFO(kTag, "Server stopped");
 }
 
-void Stream::Impl::enableRootIndex(bool on, const std::string& mount, const std::string& title) {
+void StreamHelper::Impl::enableRootIndex(bool on, const std::string& mount, const std::string& title) {
     TraceScope ts("Stream::Impl::enableRootIndex",
         (std::ostringstream() << "on=" << (int)on << " mount='" << mount << "' title='" << title << "'").str());
     rootIndexEnabled = on;
@@ -342,7 +342,7 @@ void Stream::Impl::enableRootIndex(bool on, const std::string& mount, const std:
 // Impl: tokens
 // ============================================================================
 
-bool Stream::Impl::tokenAllowed(const Endpoint& ep, const std::string& tok, AccessRole* outRole) {
+bool StreamHelper::Impl::tokenAllowed(const Endpoint& ep, const std::string& tok, AccessRole* outRole) {
     TraceScope ts("Stream::Impl::tokenAllowed",
         (std::ostringstream() << "path=" << ep.path << " tok.len=" << tok.size()).str());
     int64_t t = nowNs();
@@ -364,7 +364,7 @@ bool Stream::Impl::tokenAllowed(const Endpoint& ep, const std::string& tok, Acce
     return false;
 }
 
-void Stream::Impl::dropExpiredTokens(Endpoint& ep) {
+void StreamHelper::Impl::dropExpiredTokens(Endpoint& ep) {
     TraceScope ts("Stream::Impl::dropExpiredTokens", ep.path);
     int64_t t = nowNs();
     std::vector<TokenEntry> keep;
@@ -381,7 +381,7 @@ void Stream::Impl::dropExpiredTokens(Endpoint& ep) {
     CV_LOG_VERBOSE(kTag, 4, "Expired tokens dropped: " << dropped << " remain=" << ep.tokens.size());
 }
 
-bool Stream::Impl::allowAccess(const std::string& endpointPath, const std::string& token, AccessRole role, int ttlSec) {
+bool StreamHelper::Impl::allowAccess(const std::string& endpointPath, const std::string& token, AccessRole role, int ttlSec) {
     TraceScope ts("Stream::Impl::allowAccess",
         (std::ostringstream() << "path=" << endpointPath << " tok.len=" << token.size()
                               << " role=" << (int)role << " ttlSec=" << ttlSec).str());
@@ -401,7 +401,7 @@ bool Stream::Impl::allowAccess(const std::string& endpointPath, const std::strin
     return true;
 }
 
-void Stream::Impl::removeAccess(const std::string& endpointPath, const std::string& token) {
+void StreamHelper::Impl::removeAccess(const std::string& endpointPath, const std::string& token) {
     TraceScope ts("Stream::Impl::removeAccess",
         (std::ostringstream() << "path=" << endpointPath << " tok.len=" << token.size()).str());
     auto ep = getByPath(endpointPath);
@@ -414,7 +414,7 @@ void Stream::Impl::removeAccess(const std::string& endpointPath, const std::stri
     CV_LOG_VERBOSE(kTag, 4, "Removed token(s): " << dropped);
 }
 
-void Stream::Impl::clearAccess(const std::string& endpointPath) {
+void StreamHelper::Impl::clearAccess(const std::string& endpointPath) {
     TraceScope ts("Stream::Impl::clearAccess", endpointPath);
     auto ep = getByPath(endpointPath);
     if (!ep) { CV_LOG_WARNING(kTag, "clearAccess: endpoint not found: " << endpointPath); return; }
@@ -428,7 +428,7 @@ void Stream::Impl::clearAccess(const std::string& endpointPath) {
 // Impl: params
 // ============================================================================
 
-bool Stream::Impl::setParam(const EndpointHandle& h, const std::string& id, const std::string& value) {
+bool StreamHelper::Impl::setParam(const EndpointHandle& h, const std::string& id, const std::string& value) {
     TraceScope ts("Stream::Impl::setParam",
         (std::ostringstream() << "hid=" << h.id << " id='" << id << "' val.len=" << value.size()).str());
     auto ep = getByHandle(h);
@@ -439,7 +439,7 @@ bool Stream::Impl::setParam(const EndpointHandle& h, const std::string& id, cons
     return true;
 }
 
-bool Stream::Impl::getParam(const EndpointHandle& h, const std::string& id, std::string& outValue) const {
+bool StreamHelper::Impl::getParam(const EndpointHandle& h, const std::string& id, std::string& outValue) const {
     TraceScope ts("Stream::Impl::getParam",
         (std::ostringstream() << "hid=" << h.id << " id='" << id << "'").str());
     auto ep = getByHandle(h);
@@ -452,7 +452,7 @@ bool Stream::Impl::getParam(const EndpointHandle& h, const std::string& id, std:
     return true;
 }
 
-std::map<std::string,std::string> Stream::Impl::listParams(const EndpointHandle& h) const {
+std::map<std::string,std::string> StreamHelper::Impl::listParams(const EndpointHandle& h) const {
     TraceScope ts("Stream::Impl::listParams", (std::ostringstream() << "hid=" << h.id).str());
     std::map<std::string,std::string> out;
     auto ep = getByHandle(h);
@@ -463,7 +463,7 @@ std::map<std::string,std::string> Stream::Impl::listParams(const EndpointHandle&
     return out;
 }
 
-bool Stream::Impl::setParamByPath(const std::string& path, const std::string& id, const std::string& value) {
+bool StreamHelper::Impl::setParamByPath(const std::string& path, const std::string& id, const std::string& value) {
     TraceScope ts("Stream::Impl::setParamByPath",
         (std::ostringstream() << "path=" << path << " id=" << id << " val.len=" << value.size()).str());
     auto ep = getByPath(path);
@@ -472,7 +472,7 @@ bool Stream::Impl::setParamByPath(const std::string& path, const std::string& id
     ep->params[id] = value;
     return true;
 }
-bool Stream::Impl::getParamByPath(const std::string& path, const std::string& id, std::string& outValue) const {
+bool StreamHelper::Impl::getParamByPath(const std::string& path, const std::string& id, std::string& outValue) const {
     TraceScope ts("Stream::Impl::getParamByPath", (std::ostringstream() << "path=" << path << " id=" << id).str());
     auto ep = getByPath(path);
     if (!ep) { CV_LOG_WARNING(kTag, "getParamByPath: endpoint not found: " << path); return false; }
@@ -482,7 +482,7 @@ bool Stream::Impl::getParamByPath(const std::string& path, const std::string& id
     outValue = it->second;
     return true;
 }
-std::map<std::string,std::string> Stream::Impl::listParamsByPath(const std::string& path) const {
+std::map<std::string,std::string> StreamHelper::Impl::listParamsByPath(const std::string& path) const {
     TraceScope ts("Stream::Impl::listParamsByPath", path);
     std::map<std::string,std::string> out;
     auto ep = getByPath(path);
@@ -497,7 +497,7 @@ std::map<std::string,std::string> Stream::Impl::listParamsByPath(const std::stri
 // Impl: recording
 // ============================================================================
 
-std::string Stream::Impl::startRecording(const EndpointHandle& h, const std::string& dst) {
+std::string StreamHelper::Impl::startRecording(const EndpointHandle& h, const std::string& dst) {
     TraceScope ts("Stream::Impl::startRecording",
         (std::ostringstream() << "hid=" << h.id << " dst='" << dst << "'").str());
     auto ep = getByHandle(h);
@@ -538,7 +538,7 @@ std::string Stream::Impl::startRecording(const EndpointHandle& h, const std::str
 #endif
 }
 
-std::string Stream::Impl::stopRecording(const EndpointHandle& h) {
+std::string StreamHelper::Impl::stopRecording(const EndpointHandle& h) {
     TraceScope ts("Stream::Impl::stopRecording", (std::ostringstream() << "hid=" << h.id).str());
     auto ep = getByHandle(h);
     if (!ep) return std::string();
@@ -559,7 +559,7 @@ std::string Stream::Impl::stopRecording(const EndpointHandle& h) {
 #endif
 }
 
-bool Stream::Impl::configureRecording(const EndpointHandle& h, const RecordingParams& rp) {
+bool StreamHelper::Impl::configureRecording(const EndpointHandle& h, const RecordingParams& rp) {
     TraceScope ts("Stream::Impl::configureRecording",
         (std::ostringstream() << "hid=" << h.id << " dst='" << rp.destination << "'").str());
     auto ep = getByHandle(h);
@@ -582,25 +582,25 @@ bool Stream::Impl::configureRecording(const EndpointHandle& h, const RecordingPa
 #endif
 }
 
-std::string Stream::Impl::startRecordingByPath(const std::string& path, const std::string& dst) {
+std::string StreamHelper::Impl::startRecordingByPath(const std::string& path, const std::string& dst) {
     TraceScope ts("Stream::Impl::startRecordingByPath", (std::ostringstream() << "path=" << path << " dst=" << dst).str());
     auto ep = getByPath(path);
     if (!ep) return std::string();
     return startRecording(EndpointHandle(byPath[path]), dst);
 }
-std::string Stream::Impl::stopRecordingByPath(const std::string& path) {
+std::string StreamHelper::Impl::stopRecordingByPath(const std::string& path) {
     TraceScope ts("Stream::Impl::stopRecordingByPath", (std::ostringstream() << "path=" << path).str());
     auto ep = getByPath(path);
     if (!ep) return std::string();
     return stopRecording(EndpointHandle(byPath[path]));
 }
-bool Stream::Impl::configureRecordingByPath(const std::string& path, const RecordingParams& rp) {
+bool StreamHelper::Impl::configureRecordingByPath(const std::string& path, const RecordingParams& rp) {
     TraceScope ts("Stream::Impl::configureRecordingByPath", (std::ostringstream() << "path=" << path << " dst=" << rp.destination).str());
     auto ep = getByPath(path);
     if (!ep) return false;
     return configureRecording(EndpointHandle(byPath[path]), rp);
 }
-bool Stream::Impl::splitRecordingSegment(const EndpointHandle& h) {
+bool StreamHelper::Impl::splitRecordingSegment(const EndpointHandle& h) {
     TraceScope ts("Stream::Impl::splitRecordingSegment", (std::ostringstream() << "hid=" << h.id).str());
     auto ep = getByHandle(h);
     if (!ep) return false;
@@ -614,7 +614,7 @@ bool Stream::Impl::splitRecordingSegment(const EndpointHandle& h) {
     return false;
 #endif
 }
-bool Stream::Impl::splitRecordingSegmentByPath(const std::string& path) {
+bool StreamHelper::Impl::splitRecordingSegmentByPath(const std::string& path) {
     TraceScope ts("Stream::Impl::splitRecordingSegmentByPath", (std::ostringstream() << "path=" << path).str());
     auto ep = getByPath(path);
     if (!ep) return false;
@@ -625,7 +625,7 @@ bool Stream::Impl::splitRecordingSegmentByPath(const std::string& path) {
 // Impl: endpoints (add/remove) and workers
 // ============================================================================
 
-std::shared_ptr<Stream::Impl::Endpoint> Stream::Impl::getByHandle(const EndpointHandle& h) const {
+std::shared_ptr<StreamHelper::Impl::Endpoint> StreamHelper::Impl::getByHandle(const EndpointHandle& h) const {
     TraceScope ts("Stream::Impl::getByHandle", (std::ostringstream() << "hid=" << h.id).str());
     std::lock_guard<std::mutex> lock(epMtx);
     auto it = byId.find(h.id);
@@ -634,7 +634,7 @@ std::shared_ptr<Stream::Impl::Endpoint> Stream::Impl::getByHandle(const Endpoint
                          << " path=" << it->second->path);
     return it->second;
 }
-std::shared_ptr<Stream::Impl::Endpoint> Stream::Impl::getByPath(const std::string& path) const {
+std::shared_ptr<StreamHelper::Impl::Endpoint> StreamHelper::Impl::getByPath(const std::string& path) const {
     TraceScope ts("Stream::Impl::getByPath", (std::ostringstream() << "path=" << path).str());
     std::lock_guard<std::mutex> lock(epMtx);
     auto jt = byPath.find(path);
@@ -645,7 +645,7 @@ std::shared_ptr<Stream::Impl::Endpoint> Stream::Impl::getByPath(const std::strin
     return it->second;
 }
 
-EndpointHandle Stream::Impl::addRaw(const std::string& path, const FrameSource& src, const RawOptions& opts) {
+EndpointHandle StreamHelper::Impl::addRaw(const std::string& path, const FrameSource& src, const RawOptions& opts) {
     TraceScope ts("Stream::Impl::addRaw",
         (std::ostringstream() << "path=" << path << " fps=" << opts.framerate
             << " editor=" << (int)opts.editor << " title='" << opts.title << "'").str());
@@ -744,7 +744,7 @@ EndpointHandle Stream::Impl::addRaw(const std::string& path, const FrameSource& 
     return EndpointHandle(id);
 }
 
-EndpointHandle Stream::Impl::addFmp4(const std::string& path, const FrameSource& src, const Fmp4Options& opts) {
+EndpointHandle StreamHelper::Impl::addFmp4(const std::string& path, const FrameSource& src, const Fmp4Options& opts) {
     TraceScope ts("Stream::Impl::addFmp4",
         (std::ostringstream() << "path=" << path
                               << " editor=" << (int)opts.editor
@@ -866,7 +866,7 @@ EndpointHandle Stream::Impl::addFmp4(const std::string& path, const FrameSource&
 }
 
 #if defined(HAVE_STREAM_WEBRTC_GSTREAMER)
-EndpointHandle Stream::Impl::addWebRtc(const std::string& path, const EncodedSource& encoded, const WebRtcOptions& opts) {
+EndpointHandle StreamHelper::Impl::addWebRtc(const std::string& path, const EncodedSource& encoded, const WebRtcOptions& opts) {
     TraceScope ts("Stream::Impl::addWebRtc",
         (std::ostringstream() << "path=" << path << " title='" << opts.title << "'").str());
     if (!srv) { CV_LOG_ERROR(kTag, "addWebRtc: server not started"); CV_Error(cv::Error::StsError, "Server not started"); }
@@ -893,7 +893,7 @@ EndpointHandle Stream::Impl::addWebRtc(const std::string& path, const EncodedSou
 }
 #endif
 
-void Stream::Impl::remove(const EndpointHandle& h) {
+void StreamHelper::Impl::remove(const EndpointHandle& h) {
     TraceScope ts("Stream::Impl::remove", (std::ostringstream() << "hid=" << h.id).str());
     auto ep = getByHandle(h);
     if (!ep) { CV_LOG_WARNING(kTag, "remove: bad handle " << h.id); return; }
@@ -919,7 +919,7 @@ void Stream::Impl::remove(const EndpointHandle& h) {
     }
 }
 
-void Stream::Impl::removeByPath(const std::string& path) {
+void StreamHelper::Impl::removeByPath(const std::string& path) {
     TraceScope ts("Stream::Impl::removeByPath", (std::ostringstream() << "path=" << path).str());
     auto ep = getByPath(path);
     if (!ep) { CV_LOG_WARNING(kTag, "removeByPath: not found: " << path); return; }
@@ -930,7 +930,7 @@ void Stream::Impl::removeByPath(const std::string& path) {
 // WS routes
 // ============================================================================
 
-void Stream::Impl::attachRawWS(Endpoint& ep) {
+void StreamHelper::Impl::attachRawWS(Endpoint& ep) {
     TraceScope ts("Stream::Impl::attachRawWS", ep.path);
     WebSocketHandler h;
 
@@ -997,7 +997,7 @@ void Stream::Impl::attachRawWS(Endpoint& ep) {
     CV_LOG_VERBOSE(kTag, 4, "Registered RAW WS endpoint '" << ep.path << "'");
 }
 
-void Stream::Impl::attachFmp4WS(Endpoint& ep) {
+void StreamHelper::Impl::attachFmp4WS(Endpoint& ep) {
     TraceScope ts("Stream::Impl::attachFmp4WS", ep.path);
     WebSocketHandler h;
 
@@ -1073,7 +1073,7 @@ void Stream::Impl::attachFmp4WS(Endpoint& ep) {
 }
 
 #if defined(HAVE_STREAM_WEBRTC_GSTREAMER)
-void Stream::Impl::attachWebRtcWS(const WebRtcOptions& opts,
+void StreamHelper::Impl::attachWebRtcWS(const WebRtcOptions& opts,
                                   const EncodedSource& enc,
                                   Endpoint& ep)
 {
@@ -1262,7 +1262,7 @@ void Stream::Impl::attachWebRtcWS(const WebRtcOptions& opts,
 // Impl: web pages
 // ============================================================================
 
-void Stream::Impl::writeSimpleHtml(Response& res, const std::string& html) {
+void StreamHelper::Impl::writeSimpleHtml(Response& res, const std::string& html) {
     TraceScope ts("Stream::Impl::writeSimpleHtml", (std::ostringstream() << "html.len=" << html.size()).str());
     res.setStatusCode(200);
     res.setHeader("Content-Type", webpage::kContentTypeHtml);
@@ -1272,14 +1272,14 @@ void Stream::Impl::writeSimpleHtml(Response& res, const std::string& html) {
     }
 }
 
-void Stream::Impl::ensureRootPage() {
+void StreamHelper::Impl::ensureRootPage() {
     TraceScope ts("Stream::Impl::ensureRootPage",
                   (std::ostringstream() << "mount=" << rootMount << " title='" << rootTitle << "'").str());
     if (!srv) { CV_LOG_WARNING(kTag, "ensureRootPage: srv=null"); return; }
 
     const std::string mount = rootMount.empty() ? "/" : rootMount;
     const std::string title = rootTitle.empty() ? "OpenCV Stream" : rootTitle;
-    Stream::Impl* self = this; // capture explicitly by value
+    StreamHelper::Impl* self = this; // capture explicitly by value
 
     srv->registerEndpoint(mount, [self, title](const Request& rq, Response& rs) {
         // ultra-early raw sentinel (logger-independent)
@@ -1325,7 +1325,7 @@ void Stream::Impl::ensureRootPage() {
 }
 
 
-void Stream::Impl::mountEmbedded(const std::string& pagePath,
+void StreamHelper::Impl::mountEmbedded(const std::string& pagePath,
                                  const std::string& streamPath,
                                  const WebviewOptions& view)
 {
@@ -1386,7 +1386,7 @@ void Stream::Impl::mountEmbedded(const std::string& pagePath,
     CV_LOG_INFO(kTag, "Registered embedded page '" << pagePath << "' -> stream '" << streamPath << "'");
 }
 
-void Stream::Impl::mountJupyter(const std::string& pagePath,
+void StreamHelper::Impl::mountJupyter(const std::string& pagePath,
                                 const std::string& streamPath,
                                 const WebviewOptions& view)
 {
@@ -1444,7 +1444,7 @@ void Stream::Impl::mountJupyter(const std::string& pagePath,
 // Impl: introspection
 // ============================================================================
 
-std::vector<std::string> Stream::Impl::listEndpoints() const {
+std::vector<std::string> StreamHelper::Impl::listEndpoints() const {
     TraceScope ts("Stream::Impl::listEndpoints");
     std::vector<std::string> out;
     std::lock_guard<std::mutex> lock(epMtx);
@@ -1454,7 +1454,7 @@ std::vector<std::string> Stream::Impl::listEndpoints() const {
     return out;
 }
 
-EndpointKind Stream::Impl::kindOf(const std::string& path) const {
+EndpointKind StreamHelper::Impl::kindOf(const std::string& path) const {
     TraceScope ts("Stream::Impl::kindOf", path);
     auto ep = getByPath(path);
     if (!ep) return EndpointKind::Raw;
@@ -1466,10 +1466,10 @@ EndpointKind Stream::Impl::kindOf(const std::string& path) const {
 // Public wrappers
 // ============================================================================
 
-Stream::Stream() : pimpl(new Impl) { CV_LOG_VERBOSE(kTag, 4, "Stream() @" << std::hex << (uintptr_t)this << std::dec); }
-Stream::~Stream() { CV_LOG_VERBOSE(kTag, 4, "~Stream() @" << std::hex << (uintptr_t)this << std::dec); }
+StreamHelper::StreamHelper() : pimpl(new Impl) { CV_LOG_VERBOSE(kTag, 4, "Stream() @" << std::hex << (uintptr_t)this << std::dec); }
+StreamHelper::~StreamHelper() { CV_LOG_VERBOSE(kTag, 4, "~Stream() @" << std::hex << (uintptr_t)this << std::dec); }
 
-bool Stream::start(const std::string& bindAddress, int port, bool secureMode, int numThreads) {
+bool StreamHelper::start(const std::string& bindAddress, int port, bool secureMode, int numThreads) {
     TraceScope ts("Stream::start",
         (std::ostringstream() << "bindAddress=" << bindAddress << " port=" << port
                               << " secure=" << (int)secureMode << " threads=" << numThreads).str());
@@ -1484,131 +1484,131 @@ bool Stream::start(const std::string& bindAddress, int port, bool secureMode, in
     return pimpl->start(bindAddress, port, secureMode, numThreads);
 }
 
-void Stream::stop() { TraceScope ts("Stream::stop"); if (pimpl) pimpl->stop(); }
-bool Stream::isRunning() const { return pimpl && pimpl->isRunning(); }
-void Stream::setSecureMode(bool on) { TraceScope ts("Stream::setSecureMode", (std::ostringstream() << "on=" << (int)on).str()); if (pimpl) pimpl->setSecureMode(on); }
-bool Stream::secureMode() const { return pimpl && pimpl->secureMode(); }
-void Stream::enableRootIndex(bool on, const std::string& mountPath, const std::string& title) {
+void StreamHelper::stop() { TraceScope ts("Stream::stop"); if (pimpl) pimpl->stop(); }
+bool StreamHelper::isRunning() const { return pimpl && pimpl->isRunning(); }
+void StreamHelper::setSecureMode(bool on) { TraceScope ts("Stream::setSecureMode", (std::ostringstream() << "on=" << (int)on).str()); if (pimpl) pimpl->setSecureMode(on); }
+bool StreamHelper::secureMode() const { return pimpl && pimpl->secureMode(); }
+void StreamHelper::enableRootIndex(bool on, const std::string& mountPath, const std::string& title) {
     TraceScope ts("Stream::enableRootIndex",
         (std::ostringstream() << "on=" << (int)on << " mountPath=" << mountPath << " title='" << title << "'").str());
     if (pimpl) pimpl->enableRootIndex(on, mountPath, title);
 }
 
-EndpointHandle Stream::addRaw(const std::string& path, const FrameSource& src, const RawOptions& opts) {
+EndpointHandle StreamHelper::addRaw(const std::string& path, const FrameSource& src, const RawOptions& opts) {
     TraceScope ts("Stream::addRaw", (std::ostringstream() << "path=" << path).str());
     if (!pimpl) return EndpointHandle();
     return pimpl->addRaw(path, src, opts);
 }
-EndpointHandle Stream::addFmp4(const std::string& path, const FrameSource& src, const Fmp4Options& opts) {
+EndpointHandle StreamHelper::addFmp4(const std::string& path, const FrameSource& src, const Fmp4Options& opts) {
     TraceScope ts("Stream::addFmp4", (std::ostringstream() << "path=" << path).str());
     if (!pimpl) return EndpointHandle();
     return pimpl->addFmp4(path, src, opts);
 }
 #if defined(HAVE_STREAM_WEBRTC_GSTREAMER)
-EndpointHandle Stream::addWebRtc(const std::string& path, const EncodedSource& encoded, const WebRtcOptions& opts) {
+EndpointHandle StreamHelper::addWebRtc(const std::string& path, const EncodedSource& encoded, const WebRtcOptions& opts) {
     TraceScope ts("Stream::addWebRtc", (std::ostringstream() << "path=" << path).str());
     if (!pimpl) return EndpointHandle();
     return pimpl->addWebRtc(path, encoded, opts);
 }
 #endif
 
-void Stream::remove(const EndpointHandle& h) { TraceScope ts("Stream::remove", (std::ostringstream() << "hid=" << h.id).str()); if (pimpl) pimpl->remove(h); }
-void Stream::removeByPath(const std::string& path) { TraceScope ts("Stream::removeByPath", (std::ostringstream() << "path=" << path).str()); if (pimpl) pimpl->removeByPath(path); }
+void StreamHelper::remove(const EndpointHandle& h) { TraceScope ts("Stream::remove", (std::ostringstream() << "hid=" << h.id).str()); if (pimpl) pimpl->remove(h); }
+void StreamHelper::removeByPath(const std::string& path) { TraceScope ts("Stream::removeByPath", (std::ostringstream() << "path=" << path).str()); if (pimpl) pimpl->removeByPath(path); }
 
-void Stream::mountEmbedded(const std::string& pagePath, const std::string& streamPath, const WebviewOptions& view) {
+void StreamHelper::mountEmbedded(const std::string& pagePath, const std::string& streamPath, const WebviewOptions& view) {
     TraceScope ts("Stream::mountEmbedded",
         (std::ostringstream() << "pagePath=" << pagePath << " streamPath=" << streamPath).str());
     if (pimpl) pimpl->mountEmbedded(pagePath, streamPath, view);
 }
-void Stream::mountJupyter(const std::string& pagePath, const std::string& streamPath, const WebviewOptions& view) {
+void StreamHelper::mountJupyter(const std::string& pagePath, const std::string& streamPath, const WebviewOptions& view) {
     TraceScope ts("Stream::mountJupyter",
         (std::ostringstream() << "pagePath=" << pagePath << " streamPath=" << streamPath).str());
     if (pimpl) pimpl->mountJupyter(pagePath, streamPath, view);
 }
 
-bool Stream::allowAccess(const std::string& endpointPath, const std::string& token, AccessRole role, int ttlSeconds) {
+bool StreamHelper::allowAccess(const std::string& endpointPath, const std::string& token, AccessRole role, int ttlSeconds) {
     TraceScope ts("Stream::allowAccess", (std::ostringstream() << "path=" << endpointPath << " ttl=" << ttlSeconds).str());
     return pimpl && pimpl->allowAccess(endpointPath, token, role, ttlSeconds);
 }
-void Stream::removeAccess(const std::string& endpointPath, const std::string& token) {
+void StreamHelper::removeAccess(const std::string& endpointPath, const std::string& token) {
     TraceScope ts("Stream::removeAccess", (std::ostringstream() << "path=" << endpointPath).str());
     if (pimpl) pimpl->removeAccess(endpointPath, token);
 }
-void Stream::clearAccess(const std::string& endpointPath) {
+void StreamHelper::clearAccess(const std::string& endpointPath) {
     TraceScope ts("Stream::clearAccess", (std::ostringstream() << "path=" << endpointPath).str());
     if (pimpl) pimpl->clearAccess(endpointPath);
 }
 
-bool Stream::setParam(const EndpointHandle& h, const std::string& id, const std::string& value) {
+bool StreamHelper::setParam(const EndpointHandle& h, const std::string& id, const std::string& value) {
     TraceScope ts("Stream::setParam", (std::ostringstream() << "hid=" << h.id << " id=" << id).str());
     return pimpl && pimpl->setParam(h, id, value);
 }
-bool Stream::getParam(const EndpointHandle& h, const std::string& id, std::string& outValue) const {
+bool StreamHelper::getParam(const EndpointHandle& h, const std::string& id, std::string& outValue) const {
     TraceScope ts("Stream::getParam", (std::ostringstream() << "hid=" << h.id << " id=" << id).str());
     return pimpl && pimpl->getParam(h, id, outValue);
 }
-std::map<std::string,std::string> Stream::listParams(const EndpointHandle& h) const {
+std::map<std::string,std::string> StreamHelper::listParams(const EndpointHandle& h) const {
     TraceScope ts("Stream::listParams", (std::ostringstream() << "hid=" << h.id).str());
     return pimpl ? pimpl->listParams(h) : std::map<std::string,std::string>();
 }
 
-bool Stream::setParamByPath(const std::string& path, const std::string& id, const std::string& value) {
+bool StreamHelper::setParamByPath(const std::string& path, const std::string& id, const std::string& value) {
     TraceScope ts("Stream::setParamByPath", (std::ostringstream() << "path=" << path << " id=" << id).str());
     return pimpl && pimpl->setParamByPath(path, id, value);
 }
-bool Stream::getParamByPath(const std::string& path, const std::string& id, std::string& outValue) const {
+bool StreamHelper::getParamByPath(const std::string& path, const std::string& id, std::string& outValue) const {
     TraceScope ts("Stream::getParamByPath", (std::ostringstream() << "path=" << path << " id=" << id).str());
     return pimpl && pimpl->getParamByPath(path, id, outValue);
 }
-std::map<std::string,std::string> Stream::listParamsByPath(const std::string& path) const {
+std::map<std::string,std::string> StreamHelper::listParamsByPath(const std::string& path) const {
     TraceScope ts("Stream::listParamsByPath", (std::ostringstream() << "path=" << path).str());
     return pimpl ? pimpl->listParamsByPath(path) : std::map<std::string,std::string>();
 }
 
-std::string Stream::startRecording(const EndpointHandle& h, const std::string& destination) {
+std::string StreamHelper::startRecording(const EndpointHandle& h, const std::string& destination) {
     TraceScope ts("Stream::startRecording", (std::ostringstream() << "hid=" << h.id << " dst=" << destination).str());
     return pimpl ? pimpl->startRecording(h, destination) : std::string();
 }
-std::string Stream::stopRecording(const EndpointHandle& h) {
+std::string StreamHelper::stopRecording(const EndpointHandle& h) {
     TraceScope ts("Stream::stopRecording", (std::ostringstream() << "hid=" << h.id).str());
     return pimpl ? pimpl->stopRecording(h) : std::string();
 }
-bool Stream::configureRecording(const EndpointHandle& h, const RecordingParams& params) {
+bool StreamHelper::configureRecording(const EndpointHandle& h, const RecordingParams& params) {
     TraceScope ts("Stream::configureRecording", (std::ostringstream() << "hid=" << h.id << " dst=" << params.destination).str());
     return pimpl && pimpl->configureRecording(h, params);
 }
 
-std::string Stream::startRecordingByPath(const std::string& path, const std::string& destination) {
+std::string StreamHelper::startRecordingByPath(const std::string& path, const std::string& destination) {
     TraceScope ts("Stream::startRecordingByPath", (std::ostringstream() << "path=" << path << " dst=" << destination).str());
     return pimpl ? pimpl->startRecordingByPath(path, destination) : std::string();
 }
-std::string Stream::stopRecordingByPath(const std::string& path) {
+std::string StreamHelper::stopRecordingByPath(const std::string& path) {
     TraceScope ts("Stream::stopRecordingByPath", (std::ostringstream() << "path=" << path).str());
     return pimpl ? pimpl->stopRecordingByPath(path) : std::string();
 }
-bool Stream::configureRecordingByPath(const std::string& path, const RecordingParams& params) {
+bool StreamHelper::configureRecordingByPath(const std::string& path, const RecordingParams& params) {
     TraceScope ts("Stream::configureRecordingByPath", (std::ostringstream() << "path=" << path << " dst=" << params.destination).str());
     return pimpl && pimpl->configureRecordingByPath(path, params);
 }
-bool Stream::splitRecordingSegment(const EndpointHandle& h) {
+bool StreamHelper::splitRecordingSegment(const EndpointHandle& h) {
     TraceScope ts("Stream::splitRecordingSegment", (std::ostringstream() << "hid=" << h.id).str());
     return pimpl && pimpl->splitRecordingSegment(h);
 }
-bool Stream::splitRecordingSegmentByPath(const std::string& path) {
+bool StreamHelper::splitRecordingSegmentByPath(const std::string& path) {
     TraceScope ts("Stream::splitRecordingSegmentByPath", (std::ostringstream() << "path=" << path).str());
     return pimpl && pimpl->splitRecordingSegmentByPath(path);
 }
 
-std::vector<std::string> Stream::listEndpoints() const {
+std::vector<std::string> StreamHelper::listEndpoints() const {
     TraceScope ts("Stream::listEndpoints");
     return pimpl ? pimpl->listEndpoints() : std::vector<std::string>();
 }
-EndpointKind Stream::kindOf(const std::string& path) const {
+EndpointKind StreamHelper::kindOf(const std::string& path) const {
     TraceScope ts("Stream::kindOf", (std::ostringstream() << "path=" << path).str());
     return pimpl ? pimpl->kindOf(path) : EndpointKind::Raw;
 }
 
-std::unique_ptr<Stream> createStream() { CV_LOG_VERBOSE(kTag, 4, "createStream()"); return std::unique_ptr<Stream>(new Stream()); }
+std::unique_ptr<StreamHelper> createStreamHelper() { CV_LOG_VERBOSE(kTag, 4, "createStream()"); return std::unique_ptr<StreamHelper>(new StreamHelper()); }
 
 } // namespace stream
 } // namespace cv
