@@ -115,10 +115,32 @@ bool Encoder::EncoderImpl::open(const EncoderParams& params) {
     if (params.codecName.empty() || params.codecName == "auto") {
         // Find best available codec in order: h264, vp8, av1
         std::vector<std::string> prioritized_list = {
-            "h264_nvenc", "h264_qsv", "h264_videotoolbox", "libx264",
-            "libvpx-vp8", "libvpx",
-            "av1_nvenc", "av1_qsv", "libsvtav1", "libaom-av1"
-        };
+            // H.264 — hardware (usually fastest)
+            "h264_nvenc",        // NVIDIA
+            "h264_qsv",          // Intel
+            "h264_amf",          // AMD
+            "h264_videotoolbox", // macOS
+            "h264_mf",           // Windows Media Foundation (if built)
+
+            // AV1 — hardware (fast on modern GPUs)
+            "av1_nvenc",
+            "av1_qsv",
+            "av1_amf",
+
+            // H.264 — software
+            "libx264",
+            "libopenh264",
+
+            // VP8 — software
+            "libvpx-vp8",
+            "libvpx",            // alias/compat
+
+            // AV1 — software (fastest → slowest)
+            "libsvtav1",
+            "librav1e",
+            "libaom-av1"
+          };
+
         for (const auto& name : prioritized_list) {
             codec = avcodec_find_encoder_by_name(name.c_str());
             if (codec) {

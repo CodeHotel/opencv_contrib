@@ -20,11 +20,35 @@ extern "C" {
 namespace cv {
 namespace stream {
 
-// Supported output codecs (and their hardware/software aliases) for streaming/recording:
-//   • H.264/AVC: "libx264", "h264_nvenc", "h264_qsv", "h264_videotoolbox", "h264_amf", "h264_vaapi", etc.
-//   • VP8:       "libvpx" or "libvpx-vp8"
-//   • AV1:       "libaom-av1", "libsvtav1", "av1_nvenc", "av1_qsv", "av1_vaapi", "av1_amf", etc.
-// Other codecs are not guaranteed. "auto" selects the best available from {H.264 → VP8 → AV1} for WebRTC/MSE paths.
+/*
+Supported output codecs for streaming/recording (no explicit hardware-frames
+plumbing required; FFmpeg can upload/convert from system-memory frames):
+
+  • H.264/AVC (HW or SW):
+      "h264_nvenc", "h264_qsv", "h264_videotoolbox", "h264_amf", "h264_mf",
+      "libx264", "libopenh264"
+
+  • VP8 (SW):
+      "libvpx", "libvpx-vp8"
+
+  • AV1 (HW or SW):
+      "av1_nvenc", "av1_qsv", "av1_amf",
+      "libsvtav1", "librav1e", "libaom-av1"
+
+Backends that typically require an explicit HW-frames path (e.g., VAAPI,
+Vulkan Video, V4L2 M2M) are NOT attempted by "auto" in this implementation.
+
+"auto" selection prefers fastest→slowest (typical) among backends that accept
+system-memory frames:
+
+  H.264 HW (NVENC/QSV/AMF/Videotoolbox/MF)
+  → H.264 SW (libx264/libopenh264)
+  → VP8 SW (libvpx)
+  → AV1 HW (NVENC/QSV/AMF)
+  → AV1 SW (SVT-AV1 → rav1e → libaom)
+
+Other codecs are not guaranteed.
+*/
 
 // --- Core configuration ------------------------------------------------------
 
@@ -46,8 +70,8 @@ struct CV_EXPORTS_W EncoderParams {
     // Optional encoder “hints” (mapped to FFmpeg private options when applicable).
     // Examples:
     //   - H.264 (x264): profile="baseline", preset="ultrafast", tune="zerolatency"
-    //   - H.264 (NVENC): preset="llhp", profile="high", and still set maxBFrames=0
-    //   - VP8/AV1: may ignore profile/preset/tune
+    //   - H.264 (NVENC): preset="llhp"/"llhq", profile="high", and keep maxBFrames=0
+    //   - VP8/AV1: may ignore profile/preset/tune depending on encoder
     CV_PROP_RW std::string profile;      // e.g. "baseline", "main", "high"
     CV_PROP_RW std::string preset;       // e.g. "ultrafast", "veryfast", "llhq", "llhp"
     CV_PROP_RW std::string tune;         // e.g. "zerolatency"
@@ -60,11 +84,20 @@ struct CV_EXPORTS_W EncoderParams {
     CV_PROP_RW std::map<std::string, std::string> codecOptions;
 
     // Name of the FFmpeg encoder to use. Must resolve to H.264, VP8, or AV1.
-    // Examples:
-    //   H.264: "auto", "libx264", "h264_nvenc", "h264_qsv", "h264_videotoolbox", "h264_amf", "h264_vaapi"
+    //
+    // Examples (kept compatible with system-memory input; no explicit HW-frames setup required):
+    //   H.264: "auto", "libx264", "libopenh264",
+    //          "h264_nvenc", "h264_qsv", "h264_videotoolbox", "h264_amf", "h264_mf"
     //   VP8:   "libvpx", "libvpx-vp8"
-    //   AV1:   "libaom-av1", "libsvtav1", "av1_nvenc", "av1_qsv", "av1_vaapi", "av1_amf"
-    // If "auto", the implementation picks from {H.264 → VP8 → AV1} based on availability and runtime path.
+    //   AV1:   "libsvtav1", "librav1e", "libaom-av1",
+    //          "av1_nvenc", "av1_qsv", "av1_amf"
+    //
+    // Notes:
+    //   • VAAPI/Vulkan/V4L2M2M encoders are not selected by "auto" here because they
+    //     typically require an explicit HW device/frames path; use them only if the
+    //     implementation adds that plumbing.
+    //
+    // If "auto", the implementation picks from the priority set described above.
     CV_PROP_RW std::string codecName; // default empty/auto allowed
 };
 
@@ -132,7 +165,7 @@ public:
     CV_WRAP bool splitSegment();
 
     // Returns available encoders filtered to those that produce H.264, VP8, or AV1.
-    // key = FFmpeg encoder name, value = isHardwareAccelerated
+    // key = FFmpeg encoder name, value = isHardwareAccelerated (heuristic).
     CV_WRAP static std::map<std::string, bool> getAvailableEncoders();
 
     Encoder(const Encoder&) = delete;
