@@ -260,6 +260,13 @@ if(BUILD_TESTS)
     add_stream_test(opencv_test_stream_raw    ${CMAKE_CURRENT_SOURCE_DIR}/test/raw_stream_test.cpp)
     add_stream_test(opencv_test_stream_fmp4    ${CMAKE_CURRENT_SOURCE_DIR}/test/fmp4_stream_test.cpp)
     add_stream_test(opencv_test_stream_webrtc    ${CMAKE_CURRENT_SOURCE_DIR}/test/webrtc_stream_test.cpp)
+
+    # Add client impls only to the websocket test
+    file(GLOB _ws_client_srcs CONFIGURE_DEPENDS
+            "${CMAKE_CURRENT_SOURCE_DIR}/test/client/*.cpp")
+    if(_ws_client_srcs)
+        target_sources(opencv_test_stream_websocket PRIVATE ${_ws_client_srcs})
+    endif()
 endif()
 
 # --------------------------------------------------------------------------- #

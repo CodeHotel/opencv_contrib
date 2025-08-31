@@ -1,13 +1,12 @@
 // client_civetweb.cpp
 //
-// Backend: CivetWeb
+// Backend: CivetWeb (WS only; no TLS/WSS)
 // Builds only for test targets.
 // Requires civetweb built with USE_WEBSOCKET.
-//
+
 #if defined(HAVE_STREAM_HTTP_CIVETWEB) && defined(OCV_BUILD_TESTS)
 
-#include "opencv2/stream/client.hpp"
-#include "opencv2/stream/server.hpp" // for WsCloseCode + WebSocketHandler
+#include "../client.hpp"
 #include <civetweb.h>
 
 #include <atomic>
@@ -35,8 +34,18 @@
 #define MG_WEBSOCKET_OPCODE_PONG   0xA
 #endif
 
+namespace {
+    using cv::utils::logging::LogLevel;
+    static cv::utils::logging::LogTag kStreamLogTag(
+        "cv.stream.client",
+        LogLevel::LOG_LEVEL_VERBOSE
+    );
+    cv::utils::logging::LogTag* kTag = &kStreamLogTag;
+}
+
 namespace cv {
 namespace stream {
+namespace client {
 
 // ==============================
 // Client::Impl (CivetWeb)
@@ -72,18 +81,14 @@ private:
     static int data_cb(struct mg_connection* c, int flags, char* data, size_t len, void* user);
     static void close_cb(const struct mg_connection* c, void* user);
 
-    // Very small ws:// / wss:// URL parser.
-    static bool parseWsUrl(const std::string& url, bool& tls, std::string& host, int& port, std::string& path) {
-        tls = false; host.clear(); path = "/"; port = 0;
+    // Very small ws:// URL parser.
+    static bool parseWsUrl(const std::string& url, std::string& host, int& port, std::string& path) {
+        host.clear(); path = "/"; port = 0;
 
-        // scheme
         const std::string ws  = "ws://";
-        const std::string wss = "wss://";
         size_t off = 0;
         if (url.compare(0, ws.size(), ws) == 0) {
-            off = ws.size(); tls = false; port = 80;
-        } else if (url.compare(0, wss.size(), wss) == 0) {
-            off = wss.size(); tls = true; port = 443;
+            off = ws.size(); port = 80;
         } else {
             return false;
         }
@@ -115,39 +120,18 @@ private:
             std::lock_guard<std::mutex> lk(mx_);
             cb = cb_;
         }
-        if (cb.onOpen) {
-            // Prepare a lightweight session adapter to pass to onOpen.
-            struct OpenAdapter final : WebSocketSession {
-                explicit OpenAdapter(Client::Impl* impl) : impl(impl) {}
-                bool send(const void* d, size_t n, bool bin) override { return impl->send(d, n, bin); }
-                void close(WsCloseCode c, const std::string& r) override { impl->close(c, r); }
-                bool isOpen() const override { return impl->isOpen(); }
-                std::string remoteAddress() const override { return impl->remoteAddress(); }
-                Client::Impl* impl;
-            } adapter(this);
-            cb.onOpen(adapter);
-        }
+        if (cb.onOpen) cb.onOpen();
     }
 
-    void onClose(int code, const std::string& reason) {
-        bool wasOpen = open_.exchange(false, std::memory_order_acq_rel);
+    void onClose(WsCloseCode code, const std::string& reason) {
+        const bool wasOpen = open_.exchange(false, std::memory_order_acq_rel);
+        if (!wasOpen) return;
         WebSocketHandler cb;
         {
             std::lock_guard<std::mutex> lk(mx_);
             cb = cb_;
         }
-        if (wasOpen && cb.onClose) {
-            // Same small adapter as above.
-            struct CloseAdapter final : WebSocketSession {
-                explicit CloseAdapter(Client::Impl* impl) : impl(impl) {}
-                bool send(const void* d, size_t n, bool bin) override { return impl->send(d, n, bin); }
-                void close(WsCloseCode c, const std::string& r) override { impl->close(c, r); }
-                bool isOpen() const override { return impl->isOpen(); }
-                std::string remoteAddress() const override { return impl->remoteAddress(); }
-                Client::Impl* impl;
-            } adapter(this);
-            cb.onClose(adapter, code, reason);
-        }
+        if (cb.onClosed) cb.onClosed(code, reason);
     }
 
     void onMessage(int flags, const char* data, size_t len) {
@@ -157,47 +141,13 @@ private:
             cb = cb_;
         }
         const int opcode = (flags & 0x0F);
-        if (opcode == MG_WEBSOCKET_OPCODE_PING) {
-            if (cb.onPing) {
-                // Adapter not strictly required, but keep consistent
-                struct PingAdapter final : WebSocketSession {
-                    explicit PingAdapter(Client::Impl* impl) : impl(impl) {}
-                    bool send(const void* d, size_t n, bool bin) override { return impl->send(d, n, bin); }
-                    void close(WsCloseCode c, const std::string& r) override { impl->close(c, r); }
-                    bool isOpen() const override { return impl->isOpen(); }
-                    std::string remoteAddress() const override { return impl->remoteAddress(); }
-                    Client::Impl* impl;
-                } adapter(this);
-                cb.onPing(adapter, reinterpret_cast<const uint8_t*>(data), len);
-            }
-            return;
-        }
-        if (opcode == MG_WEBSOCKET_OPCODE_PONG) {
-            if (cb.onPong) {
-                struct PongAdapter final : WebSocketSession {
-                    explicit PongAdapter(Client::Impl* impl) : impl(impl) {}
-                    bool send(const void* d, size_t n, bool bin) override { return impl->send(d, n, bin); }
-                    void close(WsCloseCode c, const std::string& r) override { impl->close(c, r); }
-                    bool isOpen() const override { return impl->isOpen(); }
-                    std::string remoteAddress() const override { return impl->remoteAddress(); }
-                    Client::Impl* impl;
-                } adapter(this);
-                cb.onPong(adapter, reinterpret_cast<const uint8_t*>(data), len);
-            }
+        if (opcode == MG_WEBSOCKET_OPCODE_PING || opcode == MG_WEBSOCKET_OPCODE_PONG) {
+            // No ping/pong callbacks in the test handler; ignore.
             return;
         }
         if (cb.onMessage && (opcode == MG_WEBSOCKET_OPCODE_BINARY || opcode == MG_WEBSOCKET_OPCODE_TEXT)) {
             const bool isBinary = (opcode == MG_WEBSOCKET_OPCODE_BINARY);
-            // Minimal adapter to satisfy signature
-            struct MsgAdapter final : WebSocketSession {
-                explicit MsgAdapter(Client::Impl* impl) : impl(impl) {}
-                bool send(const void* d, size_t n, bool bin) override { return impl->send(d, n, bin); }
-                void close(WsCloseCode c, const std::string& r) override { impl->close(c, r); }
-                bool isOpen() const override { return impl->isOpen(); }
-                std::string remoteAddress() const override { return impl->remoteAddress(); }
-                Client::Impl* impl;
-            } adapter(this);
-            cb.onMessage(adapter, reinterpret_cast<const uint8_t*>(data), len, isBinary);
+            cb.onMessage(static_cast<const void*>(data), len, isBinary);
         }
     }
 
@@ -217,7 +167,7 @@ int Client::Impl::data_cb(struct mg_connection* c, int flags, char* data, size_t
 
     const int opcode = (flags & 0x0F);
     if (opcode == MG_WEBSOCKET_OPCODE_CLOSE) {
-        self->onClose(static_cast<int>(WsCloseCode::Normal), std::string());
+        self->onClose(WsCloseCode::Normal, std::string());
         return 1;
     }
 
@@ -229,7 +179,7 @@ int Client::Impl::data_cb(struct mg_connection* c, int flags, char* data, size_t
 void Client::Impl::close_cb(const struct mg_connection* /*c*/, void* user) {
     auto* self = static_cast<Client::Impl*>(user);
     if (!self) return;
-    self->onClose(static_cast<int>(WsCloseCode::Normal), std::string());
+    self->onClose(WsCloseCode::Normal, std::string());
 }
 
 // Connect
@@ -239,21 +189,20 @@ bool Client::Impl::connect(const std::string& url,
 {
     (void)opts; // CivetWeb client API does not expose custom headers/subprotocols here.
 
-    bool tls = false;
     std::string host, path;
     int port = 0;
-    if (!parseWsUrl(url, tls, host, port, path)) {
+    if (!parseWsUrl(url, host, port, path)) {
+        if (callbacks.onError) callbacks.onError("Invalid ws:// URL");
         return false;
     }
 
     char ebuf[256] = {0};
 
     // CivetWeb performs the handshake synchronously; if it returns non-null, we're connected.
-    // origin = nullptr; data & close callbacks are invoked by CivetWeb's internal thread.
     mg_connection* c = mg_connect_websocket_client(
         host.c_str(),
         port,
-        tls ? 1 : 0,
+        0, // NO TLS (ws:// only)
         ebuf,
         sizeof(ebuf),
         path.c_str(),
@@ -263,6 +212,7 @@ bool Client::Impl::connect(const std::string& url,
         this);
 
     if (!c) {
+        if (callbacks.onError) callbacks.onError(ebuf[0] ? std::string(ebuf) : std::string("connect failed"));
         return false;
     }
 
@@ -292,7 +242,7 @@ void Client::Impl::close(WsCloseCode /*code*/, const std::string& /*reason*/) {
     if (toClose) {
         mg_close_connection(toClose);
     }
-    onClose(static_cast<int>(WsCloseCode::Normal), std::string());
+    onClose(WsCloseCode::Normal, std::string());
 }
 
 // Send frame
@@ -346,6 +296,151 @@ std::unique_ptr<Client> createWebSocketClient() {
     return std::unique_ptr<Client>(new Client());
 }
 
+// ==============================
+// Minimal HTTP GET (HTTP only)
+// ==============================
+
+namespace {
+
+// Simple "http://" URL parser supporting arbitrary ports.
+bool parseHttpUrl(const std::string& url, std::string& host, int& port, std::string& path) {
+    host.clear(); path = "/"; port = 0;
+
+    const std::string http = "http://";
+    size_t off = 0;
+    if (url.compare(0, http.size(), http) == 0) {
+        off = http.size(); port = 80;
+    } else {
+        return false;
+    }
+
+    const size_t slash = url.find('/', off);
+    const std::string hostport = (slash == std::string::npos) ? url.substr(off) : url.substr(off, slash - off);
+    if (hostport.empty()) return false;
+
+    size_t col = hostport.rfind(':');
+    if (col != std::string::npos && hostport.find(']') == std::string::npos) {
+        host = hostport.substr(0, col);
+        try { port = std::stoi(hostport.substr(col + 1)); } catch (...) { return false; }
+    } else {
+        host = hostport;
+    }
+
+    if (slash != std::string::npos) {
+        path = url.substr(slash);
+        if (path.empty() || path[0] != '/') path = "/" + path;
+    }
+    return !host.empty() && port > 0 && port < 65536;
+}
+
+// Trim helper (left/right)
+static inline std::string trim(const std::string& s) {
+    size_t b = 0, e = s.size();
+    while (b < e && (s[b] == ' ' || s[b] == '\t' || s[b] == '\r' || s[b] == '\n')) ++b;
+    while (e > b && (s[e-1] == ' ' || s[e-1] == '\t' || s[e-1] == '\r' || s[e-1] == '\n')) --e;
+    return s.substr(b, e - b);
+}
+
+} // namespace
+
+HttpResponse httpGet(const std::string& url, const HttpRequestOptions& opts) {
+    char ebuf[256] = {0};
+
+    std::string host, path;
+    int port = 0;
+    if (!parseHttpUrl(url, host, port, path)) {
+        return HttpResponse{};  // default status = -1
+    }
+
+    mg_connection* c = mg_connect_client(host.c_str(), port, 0, ebuf, sizeof(ebuf));
+    if (!c) {
+        return HttpResponse{};  // default status = -1
+    }
+
+    // Build request
+    std::string req;
+    req.reserve(256);
+    req += "GET ";
+    req += path.empty() ? "/" : path;
+    req += " HTTP/1.0\r\nHost: ";
+    req += host;
+    req += "\r\nConnection: close\r\n";
+    for (const auto& kv : opts.headers) {
+        req += kv.first; req += ": "; req += kv.second; req += "\r\n";
+    }
+    req += "\r\n";
+
+    mg_lock_connection(c);
+    mg_printf(c, "%s", req.c_str());
+    mg_unlock_connection(c);
+
+    // Read full response (headers + body)
+    std::string raw;
+    raw.reserve(1024);
+    char buf[8192];
+    size_t maxBytes = opts.maxBodyBytes ? (opts.maxBodyBytes + 65536) : (10 * 1024 * 1024 + 65536); // room for headers
+    for (;;) {
+        int n = mg_read(c, buf, sizeof(buf));
+        if (n <= 0) break;
+        if (raw.size() + static_cast<size_t>(n) > maxBytes) {
+            raw.append(buf, buf + (maxBytes - raw.size()));
+            break;
+        }
+        raw.append(buf, buf + n);
+    }
+
+    mg_close_connection(c);
+
+    // Parse status line and headers
+    HttpResponse resp;
+    resp.status = -1;
+
+    const std::string sep = "\r\n\r\n";
+    size_t hdr_end = raw.find(sep);
+    if (hdr_end == std::string::npos) {
+        return resp; // malformed
+    }
+
+    const std::string header_blob = raw.substr(0, hdr_end);
+    resp.body = raw.substr(hdr_end + sep.size());
+
+    size_t line_start = 0;
+    size_t line_end = header_blob.find("\r\n", line_start);
+    if (line_end == std::string::npos) return resp;
+
+    // Status line: HTTP/1.x <code> ...
+    const std::string status_line = header_blob.substr(line_start, line_end - line_start);
+    size_t sp1 = status_line.find(' ');
+    if (sp1 != std::string::npos) {
+        size_t sp2 = status_line.find(' ', sp1 + 1);
+        std::string code_str = (sp2 == std::string::npos)
+                               ? status_line.substr(sp1 + 1)
+                               : status_line.substr(sp1 + 1, sp2 - (sp1 + 1));
+        try { resp.status = std::stoi(code_str); } catch (...) { resp.status = -1; }
+    }
+
+    // Headers
+    line_start = line_end + 2;
+    while (line_start < header_blob.size()) {
+        line_end = header_blob.find("\r\n", line_start);
+        const size_t len = (line_end == std::string::npos) ? (header_blob.size() - line_start) : (line_end - line_start);
+        std::string line = header_blob.substr(line_start, len);
+        if (!line.empty()) {
+            size_t colon = line.find(':');
+            if (colon != std::string::npos) {
+                std::string k = trim(line.substr(0, colon));
+                std::string v = trim(line.substr(colon + 1));
+                resp.headers.emplace_back(std::move(k), std::move(v));
+            }
+        }
+        if (line_end == std::string::npos) break;
+        line_start = line_end + 2;
+    }
+
+    return resp;
+}
+
+} // namespace test
 } // namespace stream
 } // namespace cv
 
