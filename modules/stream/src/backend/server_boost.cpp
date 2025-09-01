@@ -168,18 +168,28 @@ private:
 // Request/Response wrappers
 // =====================================================================================
 
-class BoostRequest final : public Request {
-public:
-    explicit BoostRequest(const http::request<http::string_body>& req) : req_(req) {}
+    class BoostRequest final : public Request {
+    public:
+        explicit BoostRequest(const http::request<http::string_body>& req)
+            : method_(std::string(beast::http::to_string(req.method()))),
+              path_(std::string(req.target())),
+              is_ws_(websocket::is_upgrade(req))
+        {}
 
-    std::string getMethod() const CV_OVERRIDE { return std::string(beast::http::to_string(req_.method())); }
-    std::string getPath()   const CV_OVERRIDE { return std::string(req_.target()); }
-    bool isWebSocketUpgrade() const CV_OVERRIDE { return websocket::is_upgrade(req_); }
+        std::string getMethod() const CV_OVERRIDE { return method_; }
+        std::string getPath()   const CV_OVERRIDE { return path_; }
+        bool isWebSocketUpgrade() const CV_OVERRIDE { return is_ws_; }
 
-    const http::request<http::string_body>& raw() const { return req_; }
-private:
-    const http::request<http::string_body>& req_;
-};
+        // optional: expose snapshots if you need them elsewhere
+        const std::string& methodSnapshot() const { return method_; }
+        const std::string& pathSnapshot()   const { return path_; }
+        bool wsUpgradeSnapshot() const { return is_ws_; }
+
+    private:
+        std::string method_;
+        std::string path_;
+        bool        is_ws_;
+    };
 
 class BoostResponse final : public Response {
 public:
@@ -591,11 +601,11 @@ void HttpSession::handle_request() {
     BoostRequest breq(req_);
     const std::string path = breq.getPath();
 
-    // WebSocket upgrade
+    // --- WebSocket upgrade path ---
     if (websocket::is_upgrade(req_)) {
-        std::pair<WebSocketHandler, bool> ws_h = impl_->findWebSocketHandler(path);
-        if (!ws_h.second) {
-            // Unknown WS path → HTTP 404 (no upgrade)
+        auto ws = impl_->findWebSocketHandler(path);
+        if (!ws.second) {
+            // Unknown WS endpoint: respond with a normal HTTP 404 (no upgrade)
             ServerConfig cfg = impl_->getConfig();
             http::response<http::string_body> res{ http::status::not_found, req_.version() };
             res.keep_alive(false);
@@ -612,47 +622,53 @@ void HttpSession::handle_request() {
             return;
         }
 
-        // Hand off to WS session
+        // Hand off the connection to a WebSocket session (this moves the TCP stream)
         std::shared_ptr<BoostResponse> resp(new BoostResponse(shared_from_this(), std::move(req_)));
-        resp->acceptWebSocket(ws_h.first, {});
+        (void)resp->acceptWebSocket(ws.first, {});
         return;
     }
 
-    // HTTP path
-    std::shared_ptr<BoostResponse> resp(new BoostResponse(shared_from_this(), std::move(req_)));
-    RequestHandler http_h = impl_->findHttpHandler(path);
-    if (http_h) {
-        try {
-            http_h(breq, *resp);
-        } catch (const std::exception& e) {
-            CV_LOG_ERROR(kTag, "HTTP handler exception: " << e.what());
-            resp->setStatusCode(500);
-            resp->setHeader("Content-Type", "text/plain; charset=utf-8");
-            const std::string msg = "Internal Server Error in request handler.";
-            resp->write(msg.data(), msg.size());
-        } catch (...) {
-            CV_LOG_ERROR(kTag, "HTTP handler unknown exception");
-            resp->setStatusCode(500);
-            resp->setHeader("Content-Type", "text/plain; charset=utf-8");
-            const std::string msg = "Internal Server Error in request handler.";
-            resp->write(msg.data(), msg.size());
-        }
-    } else {
-        // Uniform 404 (without exploding)
-        ServerConfig cfg = impl_->getConfig();
-        resp->setStatusCode(404);
-        resp->setHeader("Content-Type", cfg.notFound.contentType);
-        for (size_t i = 0; i < cfg.defaultNotFoundHeaders.size(); ++i)
-            resp->setHeader(cfg.defaultNotFoundHeaders[i].first, cfg.defaultNotFoundHeaders[i].second);
-        resp->write(cfg.notFound.body.data(), cfg.notFound.body.size());
-    }
+    // --- Plain HTTP path ---
+    {
+        // Response scoped: ensures destructor writes the reply before we possibly close the socket
+        std::shared_ptr<BoostResponse> resp(new BoostResponse(shared_from_this(), std::move(req_)));
 
-    if (keep_alive) do_read();
-    else {
+        RequestHandler http_h = impl_->findHttpHandler(path);
+        if (http_h) {
+            try {
+                http_h(breq, *resp);
+            } catch (const std::exception& e) {
+                CV_LOG_ERROR(kTag, "HTTP handler exception: " << e.what());
+                resp->setStatusCode(500);
+                resp->setHeader("Content-Type", "text/plain; charset=utf-8");
+                const std::string msg = "Internal Server Error in request handler.";
+                resp->write(msg.data(), msg.size());
+            } catch (...) {
+                CV_LOG_ERROR(kTag, "HTTP handler unknown exception");
+                resp->setStatusCode(500);
+                resp->setHeader("Content-Type", "text/plain; charset=utf-8");
+                const std::string msg = "Internal Server Error in request handler.";
+                resp->write(msg.data(), msg.size());
+            }
+        } else {
+            // Uniform 404 page
+            ServerConfig cfg = impl_->getConfig();
+            resp->setStatusCode(404);
+            resp->setHeader("Content-Type", cfg.notFound.contentType);
+            for (size_t i = 0; i < cfg.defaultNotFoundHeaders.size(); ++i)
+                resp->setHeader(cfg.defaultNotFoundHeaders[i].first, cfg.defaultNotFoundHeaders[i].second);
+            resp->write(cfg.notFound.body.data(), cfg.notFound.body.size());
+        }
+    } // resp dtor writes the response here
+
+    if (keep_alive) {
+        do_read();
+    } else {
         beast::error_code ignore;
         stream_.socket().shutdown(tcp::socket::shutdown_send, ignore);
     }
 }
+
 
 // =====================================================================================
 // Server::ServerImpl
