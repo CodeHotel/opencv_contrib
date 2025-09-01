@@ -43,14 +43,14 @@ static inline bool parse_int(const uint8_t* data, size_t n, long long& out) {
     while (i < j && std::isspace(static_cast<unsigned char>(data[i]))) ++i;
     while (j > i && std::isspace(static_cast<unsigned char>(data[j - 1]))) --j;
     if (i >= j) {
-        CV_LOG_VERBOSE(kTag, 4, "parse_int: empty/whitespace-only payload (n=" << n << ")");
+        CV_LOG_DEBUG(kTag, "parse_int: empty/whitespace-only payload (n=" << n << ")");
         return false;
     }
 
     bool neg = false;
     if (data[i] == '+' || data[i] == '-') { neg = (data[i] == '-'); ++i; }
     if (i >= j) {
-        CV_LOG_VERBOSE(kTag, 4, "parse_int: sign without digits");
+        CV_LOG_DEBUG(kTag, "parse_int: sign without digits");
         return false;
     }
 
@@ -58,20 +58,20 @@ static inline bool parse_int(const uint8_t* data, size_t n, long long& out) {
     for (; i < j; ++i) {
         unsigned char c = data[i];
         if (c < '0' || c > '9') {
-            CV_LOG_VERBOSE(kTag, 4, "parse_int: non-digit at offset " << (i));
+            CV_LOG_DEBUG(kTag, "parse_int: non-digit at offset " << (i));
             return false;
         }
         v = v * 10 + (c - '0');
     }
     out = neg ? -v : v;
-    CV_LOG_VERBOSE(kTag, 5, "parse_int: parsed value=" << out);
+    CV_LOG_DEBUG(kTag, "parse_int: parsed value=" << out);
     return true;
 }
 
 static bool try_start_server(cv::stream::Server& server, int base_port, int attempts, int& chosen_port, int num_threads = 2) {
     int port = base_port;
     for (int attempt = 0; attempt < attempts; ++attempt, ++port) {
-        CV_LOG_VERBOSE(kTag, 2, "Server start attempt " << attempt+1 << "/" << attempts
+        CV_LOG_DEBUG(kTag, "Server start attempt " << attempt+1 << "/" << attempts
                            << " on port " << port << " threads=" << num_threads);
         if (server.start(port, num_threads)) {
             chosen_port = port;
@@ -97,7 +97,7 @@ struct AnchorCtx {
 
 static bool wait_server_stops(cv::stream::Server& server, int timeout_seconds) {
     auto t0 = std::chrono::steady_clock::now();
-    CV_LOG_VERBOSE(kTag, 2, "Waiting for server to stop (timeout=" << timeout_seconds << "s) ...");
+    CV_LOG_DEBUG(kTag, "Waiting for server to stop (timeout=" << timeout_seconds << "s) ...");
     while (server.isRunning() &&
            std::chrono::duration_cast<std::chrono::seconds>(
                std::chrono::steady_clock::now() - t0
@@ -127,15 +127,15 @@ static bool phase_http_server_and_test(
         return false;
     }
 
-    CV_LOG_VERBOSE(kTag, 2, "Applying initial ServerConfig and registering HTTP endpoints...");
+    CV_LOG_DEBUG(kTag, "Applying initial ServerConfig and registering HTTP endpoints...");
     server->setConfig(cfg_out);
 
     for (const auto& kv : http_routes_and_bodies) {
         const std::string path = kv.first;
         const std::string body = kv.second;
-        CV_LOG_VERBOSE(kTag, 3, "Register HTTP endpoint path=\"" << path << "\" body.size=" << body.size());
+        CV_LOG_DEBUG(kTag, "Register HTTP endpoint path=\"" << path << "\" body.size=" << body.size());
         server->registerEndpoint(path, [body](const cv::stream::Request& req, cv::stream::Response& res){
-            CV_LOG_VERBOSE(kTag, 5, "HTTP handler: method=" << req.getMethod()
+            CV_LOG_DEBUG(kTag, "HTTP handler: method=" << req.getMethod()
                                  << " path=" << req.getPath());
             res.setStatusCode(200);
             res.setHeader("Content-Type", "text/html; charset=utf-8");
@@ -144,10 +144,10 @@ static bool phase_http_server_and_test(
     }
 
     path_ws = "/ws";
-    CV_LOG_VERBOSE(kTag, 2, "Register WebSocket echo endpoint at \"" << path_ws << "\"");
+    CV_LOG_DEBUG(kTag, "Register WebSocket echo endpoint at \"" << path_ws << "\"");
     cv::stream::WebSocketHandler wsEcho;
     wsEcho.onMessage = [](cv::stream::WebSocketSession& s, const uint8_t* data, size_t n, bool binary) {
-        CV_LOG_VERBOSE(kTag, 4, "WS onMessage: binary=" << (binary?1:0) << " size=" << n);
+        CV_LOG_DEBUG(kTag, "WS onMessage: binary=" << (binary?1:0) << " size=" << n);
         long long v = 0;
         if (!parse_int(data, n, v)) {
             const std::string err = "bad";
@@ -156,7 +156,7 @@ static bool phase_http_server_and_test(
             return;
         }
         const std::string out = std::to_string(v + 1);
-        CV_LOG_VERBOSE(kTag, 4, "WS echo: parsed=" << v << " replying=\"" << out << "\"");
+        CV_LOG_DEBUG(kTag, "WS echo: parsed=" << v << " replying=\"" << out << "\"");
         s.send(out.data(), out.size(), /*binary=*/false);
     };
     server->registerWebSocketEndpoint(path_ws, wsEcho);
@@ -172,11 +172,11 @@ static bool phase_http_server_and_test(
     cst::HttpRequestOptions httpOpts;
     httpOpts.timeoutMs = 4000;
 
-    CV_LOG_VERBOSE(kTag, 2, "Verifying registered HTTP endpoints (" << http_routes_and_bodies.size() << " routes) ...");
+    CV_LOG_DEBUG(kTag, "Verifying registered HTTP endpoints (" << http_routes_and_bodies.size() << " routes) ...");
     for (const auto& kv : http_routes_and_bodies) {
         const std::string url = std::string("http://127.0.0.1:") + std::to_string(port_out) + kv.first;
         auto resp = cst::httpGet(url, httpOpts);
-        CV_LOG_VERBOSE(kTag, 4, "HTTP GET " << url << " -> status=" << resp.status << " body.size=" << resp.body.size());
+        CV_LOG_DEBUG(kTag, "HTTP GET " << url << " -> status=" << resp.status << " body.size=" << resp.body.size());
         if (resp.status != 200 || resp.body != kv.second) {
             CV_LOG_ERROR(kTag, "[FAIL] HTTP GET " << url << " expected 200 & exact body; got code=" << resp.status
                              << " body.size=" << resp.body.size());
@@ -186,7 +186,7 @@ static bool phase_http_server_and_test(
 
     const std::string unknownUrl = std::string("http://127.0.0.1:") + std::to_string(port_out) + "/__no_such_endpoint__";
     auto nf = cst::httpGet(unknownUrl, httpOpts);
-    CV_LOG_VERBOSE(kTag, 3, "HTTP GET (404 expected) " << unknownUrl << " -> status=" << nf.status << " body=\"" << nf.body << "\"");
+    CV_LOG_DEBUG(kTag, "HTTP GET (404 expected) " << unknownUrl << " -> status=" << nf.status << " body=\"" << nf.body << "\"");
     if (nf.status != 404) {
         CV_LOG_ERROR(kTag, "[FAIL] Unknown endpoint did not return 404 (got " << nf.status << ")");
         return false;
@@ -199,7 +199,7 @@ static bool phase_http_server_and_test(
     {
         const std::string url = std::string("http://127.0.0.1:") + std::to_string(port_out) + http_routes_and_bodies[0].first;
         auto resp = cst::httpGet(url, httpOpts);
-        CV_LOG_VERBOSE(kTag, 3, "HTTP GET post-404 healthcheck " << url << " -> " << resp.status);
+        CV_LOG_DEBUG(kTag, "HTTP GET post-404 healthcheck " << url << " -> " << resp.status);
         if (resp.status != 200 || resp.body != http_routes_and_bodies[0].second) {
             CV_LOG_ERROR(kTag, "[FAIL] Post-404 health check failed");
             return false;
@@ -234,7 +234,7 @@ static bool phase_ws_incremental_anchor(
             std::lock_guard<std::mutex> lk(ctx->mx);
             ctx->inbox.emplace_back(reinterpret_cast<const char*>(d), n);
         }
-        CV_LOG_VERBOSE(kTag, 5, "[Anchor] Received message size=" << n);
+        CV_LOG_DEBUG(kTag, "[Anchor] Received message size=" << n);
         ctx->cv.notify_all();
     };
     cbs.onClosed = [ctx=anchorCtx](cst::WsCloseCode code, const std::string& reason){
@@ -251,7 +251,7 @@ static bool phase_ws_incremental_anchor(
 
     cst::WebSocketClientOptions opts;
     const std::string url = std::string("ws://127.0.0.1:") + std::to_string(port) + path_ws;
-    CV_LOG_VERBOSE(kTag, 2, "Connecting anchor to " << url);
+    CV_LOG_DEBUG(kTag, "Connecting anchor to " << url);
     if (!anchorClient->connect(url, cbs, opts)) {
         CV_LOG_ERROR(kTag, "[FAIL] anchor connect failed"); return false;
     }
@@ -266,14 +266,14 @@ static bool phase_ws_incremental_anchor(
     for (int i=0;i<=10;i++){
         const std::string msg = std::to_string(i);
         if (!anchorClient->send(msg)) { CV_LOG_ERROR(kTag, "[FAIL] anchor send (msg=" << msg << ")"); return false; }
-        CV_LOG_VERBOSE(kTag, 4, "[Anchor] Sent \"" << msg << "\"; awaiting reply...");
+        CV_LOG_DEBUG(kTag, "[Anchor] Sent \"" << msg << "\"; awaiting reply...");
         std::unique_lock<std::mutex> lk(anchorCtx->mx);
         bool got = anchorCtx->cv.wait_for(lk, std::chrono::seconds(2), [&]{ return !anchorCtx->inbox.empty(); });
         if (!got) { CV_LOG_ERROR(kTag, "[FAIL] anchor wait reply (msg=" << msg << ")"); return false; }
         std::string reply = std::move(anchorCtx->inbox.front()); anchorCtx->inbox.pop_front();
         lk.unlock();
         std::string expected = std::to_string(i+1);
-        CV_LOG_VERBOSE(kTag, 4, "[Anchor] Reply=\"" << reply << "\" expected=\"" << expected << "\"");
+        CV_LOG_DEBUG(kTag, "[Anchor] Reply=\"" << reply << "\" expected=\"" << expected << "\"");
         if (reply != expected) {
             CV_LOG_ERROR(kTag, "[FAIL] anchor reply mismatch for " << msg << " got " << reply << " expected " << expected);
             return false;
@@ -300,29 +300,26 @@ static bool phase_session_stress_and_shutdown(
     swarm.reserve(target);
 
     std::atomic<int> opens{0};
-    std::mutex mx; std::condition_variable cv;
 
+    // Callbacks must not capture stack objects by reference that can outlive this function.
     auto make_cb = [&](std::shared_ptr<bool> opened){
         cst::WebSocketHandler h;
-        h.onOpen = [opened, &opens, &cv](){
+        h.onOpen = [opened, &opens](){
             *opened = true;
             int o = opens.fetch_add(1) + 1;
-            CV_LOG_VERBOSE(kTag, 4, "[Swarm] onOpen (opens=" << o << ")");
-            cv.notify_all();
+            CV_LOG_DEBUG(kTag, "[Swarm] onOpen (opens=" << o << ")");
         };
-        h.onClosed = [&cv](cst::WsCloseCode code, const std::string& reason){
-            CV_LOG_VERBOSE(kTag, 5, "[Swarm] onClosed code=" << static_cast<int>(code) << " reason=\"" << reason << "\"");
-            cv.notify_all();
+        h.onClosed = [](cst::WsCloseCode code, const std::string& reason){
+            CV_LOG_DEBUG(kTag, "[Swarm] onClosed code=" << static_cast<int>(code) << " reason=\"" << reason << "\"");
         };
-        h.onError  = [&cv](const std::string& err){
-            CV_LOG_VERBOSE(kTag, 5, "[Swarm] onError: " << err);
-            cv.notify_all();
+        h.onError  = [](const std::string& err){
+            CV_LOG_DEBUG(kTag, "[Swarm] onError: " << err);
         };
         return h;
     };
 
     const std::string url = std::string("ws://127.0.0.1:") + std::to_string(port) + path_ws;
-    CV_LOG_VERBOSE(kTag, 2, "Swarm connecting to " << url << " count=" << target);
+    CV_LOG_DEBUG(kTag, "Swarm connecting to " << url << " count=" << target);
 
     for (int i=0; i<target; ++i){
         auto c = cst::createWebSocketClient();
@@ -344,23 +341,24 @@ static bool phase_session_stress_and_shutdown(
 
     {
         const std::string msg = "41";
-        CV_LOG_VERBOSE(kTag, 3, "Anchor integrity check: send \"" << msg << "\"");
+        CV_LOG_DEBUG(kTag, "Anchor integrity check: send \"" << msg << "\"");
         if (!anchorClient.send(msg)) { CV_LOG_ERROR(kTag, "[FAIL] anchor send after swarm"); return false; }
         std::unique_lock<std::mutex> lk(anchorCtx->mx);
         bool got = anchorCtx->cv.wait_for(lk, std::chrono::seconds(2), [&]{ return !anchorCtx->inbox.empty(); });
         if (!got) { CV_LOG_ERROR(kTag, "[FAIL] anchor did not receive after swarm"); return false; }
         std::string reply = std::move(anchorCtx->inbox.front()); anchorCtx->inbox.pop_front();
-        CV_LOG_VERBOSE(kTag, 3, "Anchor post-swarm reply=\"" << reply << "\"");
+        CV_LOG_DEBUG(kTag, "Anchor post-swarm reply=\"" << reply << "\"");
         if (reply != "42") { CV_LOG_ERROR(kTag, "[FAIL] anchor reply after swarm expected 42 got " << reply); return false; }
     }
 
     CV_LOG_INFO(kTag, "[PASS] Phase 4: session stress (3x threads=" << threads << ") with anchor integrity");
 
-    CV_LOG_VERBOSE(kTag, 2, "Closing anchor and swarm clients...");
+    CV_LOG_DEBUG(kTag, "Closing anchor and swarm clients...");
     anchorClient.close();
     for (auto& c : swarm) if (c) c->close();
+    swarm.clear(); // ensure destruction after threads joined
 
-    CV_LOG_VERBOSE(kTag, 2, "Stopping server...");
+    CV_LOG_DEBUG(kTag, "Stopping server...");
     server.stop();
     bool stopped = wait_server_stops(server, 10);
     if (!stopped) {
@@ -370,6 +368,7 @@ static bool phase_session_stress_and_shutdown(
     CV_LOG_INFO(kTag, "[PASS] Phase 4.5: server/client shutdown within timeout");
     return true;
 }
+
 
 // --------------- Phase 5: KA timeout + Phase 5.5 shutdown -----------------
 
@@ -391,14 +390,14 @@ static bool phase_keepalive_timeout_and_shutdown() {
     // Match requested logging style example:
     const std::string path_ = path;
     const bool ka_enabled_ = cfg.ws.enabled;
-    CV_LOG_VERBOSE(kTag, 2, "WS KA init path=" << path_ << " enabled=" << (ka_enabled_ ? 1 : 0));
+    CV_LOG_DEBUG(kTag, "WS KA init path=" << path_ << " enabled=" << (ka_enabled_ ? 1 : 0));
 
     cv::stream::WebSocketHandler wsHandler;
     wsHandler.onOpen = [](cv::stream::WebSocketSession& s){
-        CV_LOG_VERBOSE(kTag, 3, "[KA-Server] session open from " << s.remoteAddress());
+        CV_LOG_DEBUG(kTag, "[KA-Server] session open from " << s.remoteAddress());
     };
     wsHandler.onClose = [](cv::stream::WebSocketSession& s, int code, const std::string& reason){
-        CV_LOG_VERBOSE(kTag, 3, "[KA-Server] session closed (" << code << "): " << reason
+        CV_LOG_DEBUG(kTag, "[KA-Server] session closed (" << code << "): " << reason
                                  << " from " << s.remoteAddress());
     };
     server->registerWebSocketEndpoint(path, wsHandler);
@@ -434,30 +433,33 @@ static bool phase_keepalive_timeout_and_shutdown() {
         while (!token.empty() && std::isspace(static_cast<unsigned char>(token.back()))) token.pop_back();
 
         int seen = ++challenges;
-        CV_LOG_VERBOSE(kTag, 4, "[Client-KA] challenge #" << seen << " token=\"" << token << "\"");
+        CV_LOG_DEBUG(kTag, "[Client-KA] challenge #" << seen << " token=\"" << token << "\"");
         if (seen <= 3) {
             const std::string ack = "ACK " + token;
             (void)client->send(ack);
-            CV_LOG_VERBOSE(kTag, 5, "[Client-KA] sent \"" << ack << "\"");
+            CV_LOG_DEBUG(kTag, "[Client-KA] sent \"" << ack << "\"");
         } else if (seen == 4 && first_miss_ns.load() < 0) {
             first_miss_ns.store(duration_cast<nanoseconds>(steady_clock::now().time_since_epoch()).count());
-            CV_LOG_VERBOSE(kTag, 5, "[Client-KA] intentionally NOT acking challenge #" << seen << " to trigger timeout");
+            CV_LOG_DEBUG(kTag, "[Client-KA] intentionally NOT acking challenge #" << seen << " to trigger timeout");
         }
-        std::lock_guard<std::mutex> lk(mx); cv.notify_all();
+        //std::lock_guard<std::mutex> lk(mx); cv.notify_all();
+        cv.notify_one(); //no mutex needed
     };
     cbs.onClosed = [&](cst::WsCloseCode code, const std::string& reason){
         close_code = static_cast<int>(code); close_reason = reason; done.store(true);
         CV_LOG_INFO(kTag, "[Client-KA] closed by server code=" << close_code.load() << " reason=\"" << close_reason << "\"");
-        std::lock_guard<std::mutex> lk(mx); cv.notify_all();
+        //std::lock_guard<std::mutex> lk(mx); cv.notify_all();
+        cv.notify_all(); //no mutex needed
     };
     cbs.onError = [&](const std::string& err){
         CV_LOG_WARNING(kTag, "[Client-KA] error: " << err);
-        if (!client->isOpen()) { graceful.store(true); std::lock_guard<std::mutex> lk(mx); cv.notify_all(); }
+        //if (!client->isOpen()) { graceful.store(true); std::lock_guard<std::mutex> lk(mx); cv.notify_all(); }
+        if (!client->isOpen()) { graceful.store(true, std::memory_order_release); cv.notify_all(); }
     };
 
     cst::WebSocketClientOptions opts;
     const std::string url = std::string("ws://127.0.0.1:") + std::to_string(port) + path;
-    CV_LOG_VERBOSE(kTag, 2, "[Client-KA] connecting to " << url);
+    CV_LOG_DEBUG(kTag, "[Client-KA] connecting to " << url);
     if (!client->connect(url, cbs, opts)) {
         CV_LOG_ERROR(kTag, "[FAIL] KA client connect failed"); server->stop(); return false;
     }
@@ -465,14 +467,14 @@ static bool phase_keepalive_timeout_and_shutdown() {
     {
         std::unique_lock<std::mutex> lk(mx);
         bool got3 = cv.wait_for(lk, std::chrono::seconds(10), [&]{ return challenges.load() >= 3; });
-        CV_LOG_VERBOSE(kTag, 3, "[Client-KA] wait >=3 challenges -> " << (got3 ? "ok" : "timeout"));
+        CV_LOG_DEBUG(kTag, "[Client-KA] wait >=3 challenges -> " << (got3 ? "ok" : "timeout"));
         if (!got3) { CV_LOG_ERROR(kTag, "[FAIL] KA: <3 challenges"); client->close(); server->stop(); return false; }
     }
 
     {
         std::unique_lock<std::mutex> lk(mx);
         bool closed = cv.wait_for(lk, std::chrono::seconds(6), [&]{ return done.load() || graceful.load(); });
-        CV_LOG_VERBOSE(kTag, 3, "[Client-KA] wait for closure -> " << (closed ? "closed" : "still open"));
+        CV_LOG_DEBUG(kTag, "[Client-KA] wait for closure -> " << (closed ? "closed" : "still open"));
         if (!closed) { CV_LOG_ERROR(kTag, "[FAIL] KA: server did not close after missed ACK"); client->close(); server->stop(); return false; }
     }
 
@@ -484,7 +486,7 @@ static bool phase_keepalive_timeout_and_shutdown() {
         CV_LOG_WARNING(kTag, "[WARN] KA: backend signaled closure via read error (no code)");
     }
 
-    CV_LOG_VERBOSE(kTag, 2, "Closing KA client and stopping KA server...");
+    CV_LOG_DEBUG(kTag, "Closing KA client and stopping KA server...");
     client->close();
     server->stop();
     if (!wait_server_stops(*server, 10)) {

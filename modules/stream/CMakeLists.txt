@@ -263,7 +263,7 @@ if(BUILD_TESTS)
 
     # Add client impls only to the websocket test
     file(GLOB _ws_client_srcs CONFIGURE_DEPENDS
-            "${CMAKE_CURRENT_SOURCE_DIR}/test/client/*.cpp")
+            "${CMAKE_CURRENT_SOURCE_DIR}/test/client.cpp")
     if(_ws_client_srcs)
         target_sources(opencv_test_stream_websocket PRIVATE ${_ws_client_srcs})
     endif()
