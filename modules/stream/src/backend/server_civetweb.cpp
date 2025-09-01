@@ -1,4 +1,4 @@
-// server_civetweb.cpp — LOGGING-ONLY INSTRUMENTATION (super-verbose, crash breadcrumbs)
+// server_civetweb_refactored.cpp — LOGGING-ONLY INSTRUMENTATION (leaner, focused on HTTP)
 // Toggle this to 1 if you also want a crash-time backtrace + breadcrumb ring dump.
 #ifndef STREAM_CIVETWEB_CRASH_HOOK
 #define STREAM_CIVETWEB_CRASH_HOOK 1
@@ -53,6 +53,9 @@
 #endif
 #ifndef MG_WEBSOCKET_OPCODE_BINARY
 #define MG_WEBSOCKET_OPCODE_BINARY 0x2
+#endif
+#ifndef MG_WEBSOCKET_OPCODE_CLOSE
+#define MG_WEBSOCKET_OPCODE_CLOSE 0x8
 #endif
 
 namespace cv {
@@ -159,33 +162,9 @@ static inline void _install_segv_once() {}
 using cv::utils::logging::LogLevel;
 static cv::utils::logging::LogTag kStreamLogTag(
     "cv.stream.server",
-    LogLevel::LOG_LEVEL_VERBOSE
+    LogLevel::LOG_LEVEL_DEBUG
 );
 cv::utils::logging::LogTag* kTag = &kStreamLogTag;
-
-struct LogScope {
-    const char*      name;
-    const char*      file;
-    int              line;
-    std::thread::id  tid;
-    size_t           tid_hash;
-
-    LogScope(const char* n, const char* f, int l)
-        : name(n), file(f), line(l), tid(std::this_thread::get_id()),
-          tid_hash(std::hash<std::thread::id>{}(tid)) {
-        CV_LOG_VERBOSE(kTag, 5, "[ENTER] " << name << " @" << file << ":" << line << " tid=" << tid);
-        char b[512]; _bc(b, "[ENTER] %s %s:%d tid=%zu", name, file, line, (size_t)tid_hash);
-    }
-    ~LogScope() {
-        CV_LOG_VERBOSE(kTag, 5, "[EXIT ] " << name << " @" << file << ":" << line << " tid=" << tid);
-        char b[512]; _bc(b, "[EXIT ] %s %s:%d tid=%zu", name, file, line, (size_t)tid_hash);
-    }
-};
-
-#define SCOPE_TRACE(name) LogScope _cv_scope__(name, __FILE__, __LINE__)
-
-template <typename T>
-static inline std::string ptr(T* p) { std::ostringstream o; o << (const void*)p; return o.str(); }
 
 static inline std::string to_string_u64(uint64_t v) { std::ostringstream o; o << v; return o.str(); }
 static inline std::string httpStatusText(int code) {
@@ -200,10 +179,9 @@ static inline bool ci_eq(const char* a, const char* b) {
     } return *a == *b;
 }
 static inline bool is_ws_upgrade(struct mg_connection* conn) {
-    SCOPE_TRACE("is_ws_upgrade");
     const char* up = mg_get_header(conn, "Upgrade");
     const char* cn = mg_get_header(conn, "Connection");
-    CV_LOG_VERBOSE(kTag, 4, "Upgrade=" << (up?up:"(null)") << " Connection=" << (cn?cn:"(null)") << " conn=" << ptr(conn));
+    CV_LOG_DEBUG(kTag, "Upgrade=" << (up?up:"(null)") << " Connection=" << (cn?cn:"(null)") << " conn=" << (const void*)conn);
     return up && cn && ci_eq(up, "websocket") && (std::strstr(cn, "Upgrade") || std::strstr(cn, "upgrade"));
 }
 static inline std::string remote_string(const mg_request_info* ri) {
@@ -213,7 +191,6 @@ static inline std::string remote_string(const mg_request_info* ri) {
     return ip;
 }
 static inline void dump_request_info(uint64_t rid, const mg_request_info* ri) {
-    CV_LOG_VERBOSE(kTag, 4, "[RID " << rid << "] ri=" << ptr((void*)ri));
     char b[512];
     if (!ri) { _bc(b, "[RID %llu] ri=null", (unsigned long long)rid); return; }
     _bc(b, "[RID %llu] method='%s' request_uri='%s' local_uri='%s' query='%s' ver='%s' remote='%s'",
@@ -226,7 +203,7 @@ static inline void dump_request_info(uint64_t rid, const mg_request_info* ri) {
         remote_string(ri).c_str());
 #if defined(MG_MAX_HEADERS)
     for (int i=0;i<ri->num_headers;++i) {
-        CV_LOG_VERBOSE(kTag, 4, "[RID " << rid << "] H["<<i<<"] "
+        CV_LOG_DEBUG(kTag, "[RID " << rid << "] H["<<i<<"] "
                           << (ri->http_headers[i].name?ri->http_headers[i].name:"(null)") << ": "
                           << (ri->http_headers[i].value?ri->http_headers[i].value:"(null)"));
     }
@@ -252,10 +229,10 @@ static inline std::string preview(const char* data, size_t n, size_t maxn=64) {
 class CivetRequest final : public Request {
 public:
     explicit CivetRequest(struct mg_connection* c)
-        : conn_(c), ri_(mg_get_request_info(c)) { SCOPE_TRACE("CivetRequest::ctor"); }
-    std::string getMethod() const CV_OVERRIDE { SCOPE_TRACE("CivetRequest::getMethod"); return (ri_&&ri_->request_method)?ri_->request_method:std::string(); }
-    std::string getPath()   const CV_OVERRIDE { SCOPE_TRACE("CivetRequest::getPath"); if (!ri_) return {}; if (ri_->local_uri) return ri_->local_uri; if (ri_->request_uri) return ri_->request_uri; return {}; }
-    bool isWebSocketUpgrade() const CV_OVERRIDE { SCOPE_TRACE("CivetRequest::isWebSocketUpgrade"); return is_ws_upgrade(conn_); }
+        : conn_(c), ri_(mg_get_request_info(c)) {}
+    std::string getMethod() const CV_OVERRIDE { return (ri_&&ri_->request_method)?ri_->request_method:std::string(); }
+    std::string getPath()   const CV_OVERRIDE { if (!ri_) return {}; if (ri_->local_uri) return ri_->local_uri; if (ri_->request_uri) return ri_->request_uri; return {}; }
+    bool isWebSocketUpgrade() const CV_OVERRIDE { return is_ws_upgrade(conn_); }
     struct mg_connection* raw() const { return conn_; }
 private:
     struct mg_connection* conn_;
@@ -264,20 +241,18 @@ private:
 
 class CivetResponse final : public Response {
 public:
-    explicit CivetResponse(struct mg_connection* c) : conn_(c) { SCOPE_TRACE("CivetResponse::ctor"); }
+    explicit CivetResponse(struct mg_connection* c) : conn_(c) {}
     ~CivetResponse() CV_OVERRIDE {
-        SCOPE_TRACE("CivetResponse::dtor");
         if (started_ && chunked_) {
             int rc1 = mg_printf(conn_, "0\r\n\r\n");
-            CV_LOG_VERBOSE(kTag, 4, "final-chunk rc=" << rc1 << " conn=" << ptr(conn_));
+            CV_LOG_DEBUG(kTag, "final-chunk rc=" << rc1 << " conn=" << (const void*)conn_);
             char b[512]; _bc(b, "[HTTP] final-chunk rc=%d conn=%p", rc1, (void*)conn_);
         }
     }
-    void setStatusCode(int code) CV_OVERRIDE { SCOPE_TRACE("CivetResponse::setStatusCode"); if (!started_) statusCode_=code; }
-    void setHeader(const std::string& k, const std::string& v) CV_OVERRIDE { SCOPE_TRACE("CivetResponse::setHeader"); if (!started_) headers_.push_back(std::make_pair(k,v)); }
+    void setStatusCode(int code) CV_OVERRIDE { if (!started_) statusCode_=code; }
+    void setHeader(const std::string& k, const std::string& v) CV_OVERRIDE { if (!started_) headers_.push_back(std::make_pair(k,v)); }
 
-    bool write(const char* data, size_t size) CV_OVERRIDE {
-        SCOPE_TRACE("CivetResponse::write");
+        bool write(const char* data, size_t size) CV_OVERRIDE {
         if (!conn_) { CV_LOG_WARNING(kTag, "write: conn=null"); return false; }
         if (!started_) {
             bool hasCL=false, hasTE=false, hasCT=false, hasConn=false;
@@ -288,18 +263,19 @@ public:
                 if (!hasCT  && strcasecmp(h.c_str(),"Content-Type")==0) hasCT=true;
                 if (!hasConn&& strcasecmp(h.c_str(),"Connection")==0) hasConn=true;
             }
-            // Force "Connection: close" to immediately release the CivetWeb worker after the response.
-            chunked_ = !(hasCL || hasTE);
-            CV_LOG_VERBOSE(kTag, 3, "HTTP start: status="<<statusCode_<<" chunked="<<chunked_
+            // Do NOT auto-enable chunked. Honor it only if explicitly set by the handler.
+            chunked_ = hasTE;
+            CV_LOG_DEBUG(kTag, "HTTP start: status="<<statusCode_<<" chunked="<<chunked_
                                 <<" hasCL="<<hasCL<<" hasTE="<<hasTE<<" hasCT="<<hasCT<<" hasConn="<<hasConn);
             char b0[512]; _bc(b0, "[HTTP] start status=%d chunked=%d hasCL=%d hasTE=%d hasCT=%d hasConn=%d",
                               statusCode_, (int)chunked_, (int)hasCL, (int)hasTE, (int)hasCT, (int)hasConn);
             int rc = mg_printf(conn_, "HTTP/1.1 %d %s\r\n", statusCode_, httpStatusText(statusCode_).c_str());
-            CV_LOG_VERBOSE(kTag, 4, "write status rc="<<rc);
+            CV_LOG_DEBUG(kTag, "write status rc="<<rc);
             if (!hasCT)   { rc = mg_printf(conn_, "Content-Type: application/octet-stream\r\n"); }
             // Always close to free the thread (avoid keep-alive stalls)
             rc = mg_printf(conn_, "Connection: close\r\n");
-            if (chunked_) { rc = mg_printf(conn_, "Transfer-Encoding: chunked\r\n"); }
+            // Only emit TE header if the handler explicitly set chunked in headers_.
+            if (chunked_) { /* handler-provided TE will be printed below */ }
             rc = mg_printf(conn_, "Cache-Control: no-cache, no-store, must-revalidate\r\n");
             rc = mg_printf(conn_, "Pragma: no-cache\r\n");
             for (size_t i=0;i<headers_.size();++i) { rc = mg_printf(conn_, "%s: %s\r\n", headers_[i].first.c_str(), headers_[i].second.c_str()); }
@@ -318,7 +294,6 @@ public:
     }
 
     bool acceptWebSocket(const WebSocketHandler&, const std::vector<std::string>&) CV_OVERRIDE {
-        SCOPE_TRACE("CivetResponse::acceptWebSocket");
         CV_LOG_WARNING(kTag, "acceptWebSocket not supported on civetweb HTTP path");
         char b[512]; _bc(b, "[HTTP WARN] acceptWebSocket called on HTTP path");
         return false;
@@ -341,30 +316,46 @@ class CivetWebSocketSession final : public WebSocketSession,
 public:
     CivetWebSocketSession(struct mg_connection* c, std::string path, const ServerConfig& cfg)
         : conn_(c), path_(std::move(path)), cfg_(cfg), open_(true), rng_(static_cast<unsigned>(std::random_device()())) {
-        SCOPE_TRACE("CivetWebSocketSession::ctor");
-        CV_LOG_VERBOSE(kTag, 3, "WS session @"<<ptr(this)<<" conn="<<ptr(conn_)<<" path="<<path_);
+        CV_LOG_INFO(kTag, "WS session @"<<(const void*)this<<" conn="<<(const void*)conn_<<" path="<<path_);
         char b[512]; _bc(b, "[WS OPEN] sess=%p conn=%p path='%s'", (void*)this, (void*)conn_, path_.c_str());
     }
-    ~CivetWebSocketSession() CV_OVERRIDE { SCOPE_TRACE("CivetWebSocketSession::dtor"); stop_keepalive_(); }
+    ~CivetWebSocketSession() CV_OVERRIDE { stop_keepalive_(); }
 
     bool send(const void* data, size_t size, bool binary) CV_OVERRIDE {
-        SCOPE_TRACE("CivetWebSocketSession::send");
         if (!isOpen()) return false;
         std::lock_guard<std::mutex> lk(send_mx_);
         if (!isOpen()) return false;
         int opcode = binary ? MG_WEBSOCKET_OPCODE_BINARY : MG_WEBSOCKET_OPCODE_TEXT;
         int rc = mg_websocket_write(conn_, opcode, static_cast<const char*>(data), size);
-        CV_LOG_VERBOSE(kTag, 4, "mg_websocket_write rc="<<rc<<" size="<<size<<" bin="<<binary);
+        CV_LOG_DEBUG(kTag, "mg_websocket_write rc="<<rc<<" size="<<size<<" bin="<<binary);
         char b[512]; _bc(b, "[WS WRITE] rc=%d size=%zu bin=%d", rc, size, (int)binary);
         return rc >= 0;
     }
-    void close(WsCloseCode /*code*/, const std::string& reason) CV_OVERRIDE {
-        SCOPE_TRACE("CivetWebSocketSession::close");
-        CV_LOG_INFO(kTag, "WS close @"<<ptr(this)<<" reason="<<reason);
+    void close(WsCloseCode code, const std::string& reason) CV_OVERRIDE {
+        CV_LOG_INFO(kTag, "WS close @"<<(const void*)this<<" reason="<<reason);
         char b[512]; _bc(b, "[WS CLOSE] sess=%p reason='%s'", (void*)this, reason.c_str());
-        std::lock_guard<std::mutex> lk(state_mx_);
-        if (!open_) return;
-        open_ = false; mg_close_connection(conn_); cv_.notify_all();
+
+        // Ensure we only close once.
+            {
+            std::lock_guard<std::mutex> lk(state_mx_);
+            if (!open_) return;
+            open_ = false;
+            }
+
+        // Send a proper CLOSE frame with code + reason so clients don’t see 1006.
+        std::vector<char> payload;
+            {
+            const uint16_t c = static_cast<uint16_t>(code);
+            payload.push_back(static_cast<char>((c >> 8) & 0xFF));
+            payload.push_back(static_cast<char>(c & 0xFF));
+            payload.insert(payload.end(), reason.begin(), reason.end());
+            }
+        (void)mg_websocket_write(conn_, MG_WEBSOCKET_OPCODE_CLOSE,
+                                 payload.empty() ? nullptr : payload.data(),
+                                 payload.size());
+
+        cv_.notify_all();
+        mg_close_connection(conn_);
     }
     bool isOpen() const CV_OVERRIDE { return open_.load(std::memory_order_acquire); }
     std::string remoteAddress() const CV_OVERRIDE { return remote_string(mg_get_request_info(conn_)); }
@@ -375,41 +366,63 @@ public:
     const std::string& path() const { return path_; }
 
     void on_open(const WebSocketHandler& h) {
-        SCOPE_TRACE("CivetWebSocketSession::on_open");
-        handler_ = h; open_.store(true, std::memory_order_release);
+        handler_ = h;
+        open_.store(true, std::memory_order_release);
         if (handler_.onOpen) handler_.onOpen(*this);
-        if (cfg_.ws.enabled) start_keepalive_();
+
+        // Start KA only when *explicitly* configured (non-empty prefix, positive timers).
+        if (cfg_.ws.enabled &&
+            !cfg_.ws.ackPrefix.empty() &&
+            cfg_.ws.challengeInterval.count() > 0 &&
+            cfg_.ws.clientTimeout.count() > 0) {
+            start_keepalive_();
+            }
     }
     void on_data(int bits, char* data, size_t len) {
-        SCOPE_TRACE("CivetWebSocketSession::on_data");
-        bool isBinary = ((bits & 0x0F) == MG_WEBSOCKET_OPCODE_BINARY);
-        bool isText   = ((bits & 0x0F) == MG_WEBSOCKET_OPCODE_TEXT);
-        CV_LOG_VERBOSE(kTag, 4, "bits=0x"<<std::hex<<bits<<std::dec<<" len="<<len<<" bin="<<isBinary<<" txt="<<isText<<" preview="<<preview(data,std::min<size_t>(len,64)));
+        const bool isBinary = ((bits & 0x0F) == MG_WEBSOCKET_OPCODE_BINARY);
+        const bool isText   = ((bits & 0x0F) == MG_WEBSOCKET_OPCODE_TEXT);
+        CV_LOG_DEBUG(kTag, "ws data bits=0x"<<std::hex<<bits<<std::dec<<" len="<<len
+                            <<" bin="<<isBinary<<" txt="<<isText
+                            <<" preview="<<preview(data,std::min<size_t>(len,64)));
+
+        // KA ACK detection (text only): if payload == expected_ack_, cancel the wait.
+        if (isText && !expected_ack_.empty()) {
+            std::string payload(data, len);
+            // Trim surrounding whitespace like the Boost impl tolerates.
+            while (!payload.empty() && std::isspace(static_cast<unsigned char>(payload.front()))) payload.erase(payload.begin());
+            while (!payload.empty() && std::isspace(static_cast<unsigned char>(payload.back())))  payload.pop_back();
+
+            std::unique_lock<std::mutex> lk(ack_mx_);
+            if (!expected_ack_.empty() && payload == expected_ack_) {
+                expected_ack_.clear();
+                ack_received_ = true;
+                lk.unlock();
+                cv_.notify_all();
+                CV_LOG_DEBUG(kTag, "KA ACK matched; timer canceled");
+            }
+        }
+
         if (handler_.onMessage && (isBinary || isText)) {
             handler_.onMessage(*this, reinterpret_cast<const uint8_t*>(data), len, isBinary);
         }
     }
     void on_close_normal() {
-        SCOPE_TRACE("CivetWebSocketSession::on_close_normal");
         { std::lock_guard<std::mutex> lk(state_mx_); if (!open_) return; open_ = false; }
         stop_keepalive_();
         if (handler_.onClose) handler_.onClose(*this, static_cast<int>(WsCloseCode::Normal), std::string());
         cv_.notify_all();
     }
     void on_error(int ec, const char* where) {
-        SCOPE_TRACE("CivetWebSocketSession::on_error");
         CV_LOG_ERROR(kTag, "WS error ec="<<ec<<" where="<<(where?where:"(null)"));
     }
 
 private:
     void start_keepalive_() {
-        SCOPE_TRACE("CivetWebSocketSession::start_keepalive_");
         if (cfg_.ws.challengeInterval.count() <= 0) return;
         ka_stop_.store(false, std::memory_order_release);
         ka_thread_ = std::thread([self = shared_from_this()](){ self->keepalive_loop_(); });
     }
     void stop_keepalive_() {
-        SCOPE_TRACE("CivetWebSocketSession::stop_keepalive_");
         ka_stop_.store(true, std::memory_order_release); cv_.notify_all();
         if (ka_thread_.joinable()) ka_thread_.join();
     }
@@ -421,24 +434,51 @@ private:
         return s;
     }
     void keepalive_loop_() {
-        SCOPE_TRACE("CivetWebSocketSession::keepalive_loop_");
-        CV_LOG_VERBOSE(kTag, 2, "Keepalive loop start remote="<<remoteAddress());
+        CV_LOG_DEBUG(kTag, "Keepalive loop start remote="<<remoteAddress());
+
         while (!ka_stop_.load(std::memory_order_acquire) && isOpen()) {
-            { std::unique_lock<std::mutex> lk(ack_mx_); if (cv_.wait_for(lk, cfg_.ws.challengeInterval, [this]{ return ka_stop_.load() || !isOpen(); })) break; }
-            if (!isOpen() || ka_stop_.load()) break;
-            const std::string token = make_token_(cfg_.ws.challengeSize);
-            bool sent = send(token.data(), token.size(), /*binary*/false);
-            if (!sent) break;
-            bool timed_out=false;
-            { std::unique_lock<std::mutex> lk(ack_mx_);
-              if (!cv_.wait_for(lk, cfg_.ws.clientTimeout, [this]{ return !isOpen() || ka_stop_.load(); })) {
-                  timed_out = true;
-              }
+            // Sleep until next challenge (or exit if stopping/closed).
+            {
+                std::unique_lock<std::mutex> lk(ack_mx_);
+                if (cv_.wait_for(lk, cfg_.ws.challengeInterval, [this]{
+                        return ka_stop_.load(std::memory_order_acquire) || !isOpen();
+                    })) break;
             }
-            if (timed_out) { close(WsCloseCode::PolicyViolation, "keepalive timeout"); break; }
+            if (!isOpen() || ka_stop_.load()) break;
+
+            // Issue challenge.
+            const std::string token = make_token_(cfg_.ws.challengeSize);
+            {
+                std::lock_guard<std::mutex> lk(ack_mx_);
+                expected_ack_  = cfg_.ws.ackPrefix + token;
+                ack_received_  = false;
+            }
+
+            const bool sent = send(token.data(), token.size(), /*binary*/false);
+            CV_LOG_DEBUG(kTag, "KA sent token='"<<token<<"' sent="<<(int)sent);
+            if (!sent) break;
+
+            // Wait for ACK or timeout/stop/close.
+            bool ack_ok = false;
+            {
+                std::unique_lock<std::mutex> lk(ack_mx_);
+                ack_ok = cv_.wait_for(lk, cfg_.ws.clientTimeout, [this]{
+                    return ack_received_ || ka_stop_.load(std::memory_order_acquire) || !isOpen();
+                });
+                // ack_ok==true means predicate triggered; confirm it was due to ack.
+                ack_ok = ack_ok && ack_received_;
+            }
+
+            if (!ack_ok && isOpen() && !ka_stop_.load()) {
+                CV_LOG_WARNING(kTag, "KA timeout -> closing with 1008");
+                close(WsCloseCode::PolicyViolation, "keepalive timeout");
+                break;
+            }
         }
-        CV_LOG_VERBOSE(kTag, 2, "Keepalive loop end remote="<<remoteAddress());
+
+        CV_LOG_DEBUG(kTag, "Keepalive loop end remote="<<remoteAddress());
     }
+
 
 private:
     struct mg_connection* conn_;
@@ -461,23 +501,21 @@ private:
 };
 
 // ============================================================================
-// Server::ServerImpl (CivetWeb) — ULTRA VERBOSE PATH TRACE
+// Server::ServerImpl (CivetWeb) — focused logging
 // ============================================================================
 
 class Server::ServerImpl {
 public:
     ServerImpl() : ctx_(NULL) {
-        SCOPE_TRACE("ServerImpl::ctor");
-        CV_LOG_INFO(kTag, "ServerImpl created @"<<ptr(this));
+        CV_LOG_INFO(kTag, "ServerImpl created @"<<(const void*)this);
         char b[512]; _bc(b, "[SVR] ctor self=%p", (void*)this);
     }
-    ~ServerImpl() { SCOPE_TRACE("ServerImpl::dtor"); stop(); }
+    ~ServerImpl() { stop(); }
 
     bool start(int port, int num_threads) {
-        SCOPE_TRACE("ServerImpl::start");
         _install_segv_once();
         char b1[512]; _bc(b1, "[SVR] start port=%d threads=%d ctx=%p", port, num_threads, (void*)ctx_);
-        CV_LOG_INFO(kTag, "start(port="<<port<<", threads="<<num_threads<<") ctx="<<ptr(ctx_));
+        CV_LOG_INFO(kTag, "start(port="<<port<<", threads="<<num_threads<<") ctx="<<(const void*)ctx_);
         if (ctx_) return true;
 
         port_str_    = to_string_u64((unsigned short)port);
@@ -497,11 +535,11 @@ public:
 
         std::memset(&callbacks_, 0, sizeof(callbacks_));
         callbacks_.begin_request = &ServerImpl::beginRequestFallback_;
-        CV_LOG_VERBOSE(kTag, 3, "civetweb version: " << mg_version() << " callbacks@" << ptr(&callbacks_));
+        CV_LOG_DEBUG(kTag, "civetweb version: " << mg_version() << " callbacks@" << (const void*)&callbacks_);
         char b2[512]; _bc(b2, "[SVR] mg_start opts@%p callbacks@%p", (void*)options, (void*)&callbacks_);
 
         ctx_ = mg_start(&callbacks_, this, options);
-        CV_LOG_VERBOSE(kTag, 3, "mg_start ctx="<<ptr(ctx_)<<" user_data="<<ptr(this));
+        CV_LOG_DEBUG(kTag, "mg_start ctx="<<(const void*)ctx_<<" user_data="<<(const void*)this);
         char b3[512]; _bc(b3, "[SVR] mg_start ctx=%p user_data=%p", (void*)ctx_, (void*)this);
         if (!ctx_) { CV_LOG_ERROR(kTag, "civetweb mg_start failed"); _bc(b3, "[SVR] mg_start FAILED"); return false; }
 
@@ -524,8 +562,7 @@ public:
     }
 
     void stop() {
-        SCOPE_TRACE("ServerImpl::stop");
-        if (!ctx_) { CV_LOG_VERBOSE(kTag, 3, "stop: ctx=null"); char b[512]; _bc(b, "[SVR] stop ctx=null"); return; }
+        if (!ctx_) { char b[512]; _bc(b, "[SVR] stop ctx=null"); return; }
 
         std::vector<std::shared_ptr<CivetWebSocketSession> > sessions;
         {
@@ -550,9 +587,8 @@ public:
 
     // Configuration
     void setConfig(const ServerConfig& c) {
-        SCOPE_TRACE("ServerImpl::setConfig");
         std::lock_guard<std::mutex> lk(cfg_mx_); config_ = c;
-        CV_LOG_VERBOSE(kTag, 3, "cfg: 404.ct="<<config_.notFound.contentType
+        CV_LOG_DEBUG(kTag, "cfg: 404.ct="<<config_.notFound.contentType
                              <<" 404.len="<<config_.notFound.body.size()
                              <<" ws.enabled="<<config_.ws.enabled
                              <<" ws.interval="<<config_.ws.challengeInterval.count()
@@ -564,19 +600,16 @@ public:
 
     // HTTP routes
     void registerEndpoint(const std::string& path, const RequestHandler& h) {
-        SCOPE_TRACE("ServerImpl::registerEndpoint");
-        CV_LOG_INFO(kTag, "registerEndpoint path=\""<<path<<"\" ctx="<<ptr(ctx_)<<" cached(before)="<<http_routes_.size());
+        CV_LOG_INFO(kTag, "registerEndpoint path=\""<<path<<"\" ctx="<<(const void*)ctx_<<" cached(before)="<<http_routes_.size());
         char b[512]; _bc(b, "[SVR] registerEndpoint path='%s' ctx=%p cached(before)=%zu target='%s' empty=%d",
                          path.c_str(), (void*)ctx_, http_routes_.size(), h ? h.target_type().name() : "<empty>", !h);
         std::lock_guard<std::mutex> lk(mx_);
         http_routes_[path] = h;
-        CV_LOG_VERBOSE(kTag, 3, "cached path=\""<<path<<"\" cached(now)="<<http_routes_.size());
-        if (!ctx_) { CV_LOG_VERBOSE(kTag, 3, "ctx null; will install on start()"); return; }
+        if (!ctx_) { return; }
         addHttpRoute_(path);
     }
     void unregisterEndpoint(const std::string& path) {
-        SCOPE_TRACE("ServerImpl::unregisterEndpoint");
-        CV_LOG_INFO(kTag, "unregisterEndpoint path=\""<<path<<"\" ctx="<<ptr(ctx_));
+        CV_LOG_INFO(kTag, "unregisterEndpoint path=\""<<path<<"\" ctx="<<(const void*)ctx_);
         char b[512]; _bc(b, "[SVR] unregisterEndpoint path='%s' ctx=%p", path.c_str(), (void*)ctx_);
         std::lock_guard<std::mutex> lk(mx_);
         http_routes_.erase(path);
@@ -589,17 +622,15 @@ public:
 
     // WS routes
     void registerWebSocketEndpoint(const std::string& path, const WebSocketHandler& h) {
-        SCOPE_TRACE("ServerImpl::registerWebSocketEndpoint");
-        CV_LOG_INFO(kTag, "registerWebSocketEndpoint path=\""<<path<<"\" ctx="<<ptr(ctx_));
+        CV_LOG_INFO(kTag, "registerWebSocketEndpoint path=\""<<path<<"\" ctx="<<(const void*)ctx_);
         char b[512]; _bc(b, "[SVR] registerWebSocketEndpoint path='%s' ctx=%p", path.c_str(), (void*)ctx_);
         std::lock_guard<std::mutex> lk(mx_);
         ws_routes_[path] = h;
-        if (!ctx_) { CV_LOG_VERBOSE(kTag, 3, "ctx null; will install on start()"); return; }
+        if (!ctx_) { return; }
         addWsRoute_(path, h);
     }
     void unregisterWebSocketEndpoint(const std::string& path) {
-        SCOPE_TRACE("ServerImpl::unregisterWebSocketEndpoint");
-        CV_LOG_INFO(kTag, "unregisterWebSocketEndpoint path=\""<<path<<"\" ctx="<<ptr(ctx_));
+        CV_LOG_INFO(kTag, "unregisterWebSocketEndpoint path=\""<<path<<"\" ctx="<<(const void*)ctx_);
         char b[512]; _bc(b, "[SVR] unregisterWebSocketEndpoint path='%s' ctx=%p", path.c_str(), (void*)ctx_);
         std::lock_guard<std::mutex> lk(mx_);
         ws_routes_.erase(path); ws_sessions_.erase(path);
@@ -611,7 +642,6 @@ public:
     }
 
     size_t broadcast(const std::string& path, const void* data, size_t n, bool binary) {
-        SCOPE_TRACE("ServerImpl::broadcast");
         std::vector<std::shared_ptr<CivetWebSocketSession> > copy;
         {
             std::lock_guard<std::mutex> lk(mx_);
@@ -623,7 +653,6 @@ public:
         return ok;
     }
     void forEachWebSocket(const std::string& path, const std::function<void(WebSocketSession&)>& fn) {
-        SCOPE_TRACE("ServerImpl::forEachWebSocket");
         std::vector<std::shared_ptr<CivetWebSocketSession> > copy;
         {
             std::lock_guard<std::mutex> lk(mx_);
@@ -634,7 +663,6 @@ public:
         for (size_t i=0;i<copy.size();++i) fn(*copy[i]);
     }
     size_t numWebSocketClients(const std::string& path) const {
-        SCOPE_TRACE("ServerImpl::numWebSocketClients");
         std::lock_guard<std::mutex> lk(mx_);
         auto it = ws_sessions_.find(path);
         return (it==ws_sessions_.end())?0u:it->second.size();
@@ -645,36 +673,32 @@ private:
     typedef std::unordered_set<std::shared_ptr<CivetWebSocketSession> > SessionSet;
 
     void installHandlers_() {
-        SCOPE_TRACE("ServerImpl::installHandlers_");
         std::lock_guard<std::mutex> lk(mx_);
         route_data_.clear();
         for (auto it = http_routes_.begin(); it!=http_routes_.end(); ++it) addHttpRoute_(it->first);
         for (auto it = ws_routes_.begin(); it!=ws_routes_.end(); ++it) addWsRoute_(it->first, it->second);
     }
     void addHttpRoute_(const std::string& path) {
-        SCOPE_TRACE("ServerImpl::addHttpRoute_");
         std::unique_ptr<RouteData> rd(new RouteData()); rd->impl=this; rd->path=path;
         mg_set_request_handler(ctx_, path.c_str(), &ServerImpl::httpHandler_, rd.get());
         installed_http_.insert(path);
-        CV_LOG_VERBOSE(kTag, 3, "HTTP installed path=\"" << path << "\" installed_http_.size=" << installed_http_.size());
+        CV_LOG_DEBUG(kTag, "HTTP installed path=\"" << path << "\" installed_http_.size=" << installed_http_.size());
         char b[512]; _bc(b, "[SVR] HTTP install path='%s' cbdata=%p installed=%zu", path.c_str(), (void*)rd.get(), (size_t)installed_http_.size());
         route_data_.push_back(std::move(rd));
     }
     void addWsRoute_(const std::string& path, const WebSocketHandler& h) {
-        SCOPE_TRACE("ServerImpl::addWsRoute_");
         std::unique_ptr<RouteData> rd(new RouteData()); rd->impl=this; rd->path=path; rd->ws_h=h;
         mg_set_websocket_handler(ctx_, path.c_str(), &ServerImpl::wsConnect_, &ServerImpl::wsReady_, &ServerImpl::wsData_, &ServerImpl::wsClose_, rd.get());
         installed_ws_.insert(path);
-        CV_LOG_VERBOSE(kTag, 3, "WS installed path=\"" << path << "\" installed_ws_.size=" << installed_ws_.size());
+        CV_LOG_DEBUG(kTag, "WS installed path=\"" << path << "\" installed_ws_.size=" << installed_ws_.size());
         char b[512]; _bc(b, "[SVR]  WS  install path='%s' cbdata=%p installed=%zu", path.c_str(), (void*)rd.get(), (size_t)installed_ws_.size());
         route_data_.push_back(std::move(rd));
     }
     void eraseRouteDataForPath_(const std::string& path) {
-        SCOPE_TRACE("ServerImpl::eraseRouteDataForPath_");
         size_t before = route_data_.size();
         route_data_.erase(std::remove_if(route_data_.begin(), route_data_.end(),
             [&](const std::unique_ptr<RouteData>& p){ return p && p->path==path; }), route_data_.end());
-        CV_LOG_VERBOSE(kTag, 3, "eraseRouteDataForPath_ \""<<path<<"\" removed="<<(before-route_data_.size()));
+        CV_LOG_DEBUG(kTag, "eraseRouteDataForPath_ \""<<path<<"\" removed="<<(before-route_data_.size()));
         char b[512]; _bc(b, "[SVR] eraseRouteData path='%s' removed=%zu", path.c_str(), (size_t)(before-route_data_.size()));
     }
 
@@ -686,12 +710,15 @@ private:
         return active_http_.load(std::memory_order_acquire) + ws_count_.load(std::memory_order_acquire);
     }
     inline bool capacityAvailable_() const {
-        return usedWorkersApprox_() < thread_limit_;
+        // Keep one worker in reserve for handshakes/HTTP so we never fully starve.
+        const int reserve = 1;
+        const int hard_limit = std::max(1, thread_limit_ - reserve);
+        return usedWorkersApprox_() < hard_limit;
     }
     void warnRejected_(const char* kind, const mg_request_info* ri, const char* path) {
         CV_LOG_WARNING(kTag, "("<<kind<<") connection rejected due to thread shortage "
                            << "[limit="<<thread_limit_<<", used~"<<usedWorkersApprox_()<<"] "
-                           << "remote="<<remote_string(ri)<<" path="<<(path?path:""));
+                           << "remote="<<remote_string(ri)<<" path="<<(path?path:"") );
         char b[512];
         std::snprintf(b, sizeof(b), "[SVR WARN] (%s) connection rejected due to thread shortage (limit=%d used~%d) remote='%s' path='%s'",
                       kind, thread_limit_, usedWorkersApprox_(), remote_string(ri).c_str(), path?path:"");
@@ -700,7 +727,6 @@ private:
 
     // Fallback: central path-resolution trace
     static int beginRequestFallback_(struct mg_connection* conn) {
-        SCOPE_TRACE("ServerImpl::beginRequestFallback_");
         uint64_t rid = nextRid_();
         mg_context* ctx = mg_get_context(conn);
         ServerImpl* self = reinterpret_cast<ServerImpl*>(mg_get_user_data(ctx));
@@ -716,16 +742,14 @@ private:
         std::string path  = !local.empty() ? local : req;
         bool isWS = is_ws_upgrade(conn);
 
-        bool cachedHttp=false, cachedWs=false, installedHttp=false, installedWs=false;
+        bool installedHttp=false, installedWs=false;
         {
             std::lock_guard<std::mutex> lk(self->mx_);
-            cachedHttp = self->http_routes_.find(path) != self->http_routes_.end();
-            cachedWs   = self->ws_routes_.find(path)   != self->ws_routes_.end();
             installedHttp = self->installed_http_.find(path) != self->installed_http_.end();
             installedWs   = self->installed_ws_.find(path   ) != self->installed_ws_.end();
         }
-        char b1[512]; _bc(b1, "[RID %llu] PATH='%s' isWS=%d cachedHttp=%d cachedWs=%d installedHttp=%d installedWs=%d",
-                          (unsigned long long)rid, path.c_str(), (int)isWS, (int)cachedHttp, (int)cachedWs, (int)installedHttp, (int)installedWs);
+        char b1[512]; _bc(b1, "[RID %llu] PATH='%s' isWS=%d installedHttp=%d installedWs=%d",
+                          (unsigned long long)rid, path.c_str(), (int)isWS, (int)installedHttp, (int)installedWs);
 
         // If this is an HTTP request for an installed handler and we're out of workers, reject early with 503.
         if (!isWS && installedHttp && !self->capacityAvailable_()) {
@@ -743,7 +767,6 @@ private:
         }
 
         if ((!isWS && installedHttp) || (isWS && installedWs)) {
-            CV_LOG_VERBOSE(kTag, 3, "[RID "<<rid<<"] handoff to installed handler");
             char b2[512]; _bc(b2, "[RID %llu] handoff to installed handler", (unsigned long long)rid);
             return 0;
         }
@@ -772,7 +795,6 @@ private:
 
     // HTTP handler
     static int httpHandler_(struct mg_connection* conn, void* cbdata) {
-        SCOPE_TRACE("ServerImpl::httpHandler_");
         uint64_t rid = nextRid_();
         RouteData* rd = static_cast<RouteData*>(cbdata);
         char b0[512]; _bc(b0, "[RID %llu] httpHandler conn=%p rd=%p", (unsigned long long)rid, (void*)conn, (void*)rd);
@@ -789,7 +811,6 @@ private:
         {
             std::lock_guard<std::mutex> lk(rd->impl->mx_);
             auto it = rd->impl->http_routes_.find(rd->path);
-            CV_LOG_VERBOSE(kTag, 3, "[RID "<<rid<<"] lookup \""<<rd->path<<"\" found="<<(it!=rd->impl->http_routes_.end()));
             char b1[512]; _bc(b1, "[RID %llu] lookup path='%s' found=%d",
                               (unsigned long long)rid, rd->path.c_str(), (int)(it!=rd->impl->http_routes_.end()));
             if (it == rd->impl->http_routes_.end()) return 0;
@@ -798,7 +819,7 @@ private:
 
         const mg_request_info* ri = mg_get_request_info(conn);
         dump_request_info(rid, ri);
-        CV_LOG_VERBOSE(kTag, 3, "[RID "<<rid<<"] DISPATCH path=\""<<rd->path<<"\" remote="<<remote_string(ri));
+        CV_LOG_DEBUG(kTag, "[RID "<<rid<<"] DISPATCH path=\""<<rd->path<<"\" remote="<<remote_string(ri));
         char b2[512]; _bc(b2, "[RID %llu] DISPATCH path='%s' handler.empty=%d type='%s'",
                           (unsigned long long)rid, rd->path.c_str(), !handler, handler ? handler.target_type().name() : "<empty>");
 
@@ -811,7 +832,6 @@ private:
 
         try {
             handler(req, res);
-            CV_LOG_VERBOSE(kTag, 3, "[RID "<<rid<<"] handler returned path=\""<<rd->path<<"\"");
             char b4[512]; _bc(b4, "[RID %llu] AFTER CALL ok", (unsigned long long)rid);
         } catch (const std::exception& e) {
             CV_LOG_ERROR(kTag, "[RID "<<rid<<"] handler exception: "<<e.what());
@@ -840,27 +860,53 @@ private:
         // Capacity gate *before* accepting WS upgrade.
         RouteData* rd = (RouteData*)cbdata;
         if (!rd || !rd->impl) return 1;
-        // NOTE: mg_request_info is safe to read here
         const mg_request_info* ri = mg_get_request_info(cconn);
+
+        // Fast reject if we’re at/over the safe limit. This keeps the acceptor responsive.
         if (!rd->impl->capacityAvailable_()) {
             rd->impl->warnRejected_("ws", ri, rd->path.c_str());
-            // Reject upgrade. (We don't try to write a response here; browser will see handshake failure.)
-            return 1;
+            return 1; // handshake will fail quickly client-side
         }
         return 0;
     }
+
     static void wsReady_(struct mg_connection* conn, void* cbdata) {
         RouteData* rd = static_cast<RouteData*>(cbdata); if (!rd||!rd->impl) return;
         const ServerConfig cfg = rd->impl->getConfig();
         const mg_request_info* ri = mg_get_request_info(conn);
+
+        // Post-upgrade guard: if the pool filled up between wsConnect_ and here,
+        // immediately close this brand-new session to protect existing ones (anchor).
+        if (!rd->impl->capacityAvailable_()) {
+            CV_LOG_WARNING(kTag, "WS over capacity after upgrade, closing new session remote="<<remote_string(ri));
+            // Send a CLOSE(1013 Try Again Later) to be nice, then drop.
+            std::vector<char> payload;
+            {
+                const uint16_t code = 1013; // Try Again Later (advisory)
+                payload.push_back(static_cast<char>((code >> 8) & 0xFF));
+                payload.push_back(static_cast<char>(code & 0xFF));
+            }
+            mg_websocket_write(conn, MG_WEBSOCKET_OPCODE_CLOSE,
+                               payload.empty() ? nullptr : payload.data(),
+                               payload.size());
+            mg_close_connection(conn);
+            return;
+        }
+
         std::shared_ptr<CivetWebSocketSession> session(new CivetWebSocketSession(conn, rd->path, cfg));
-        { std::lock_guard<std::mutex> lk(rd->impl->mx_); rd->impl->ws_sessions_[rd->path].insert(session); }
+        {
+            std::lock_guard<std::mutex> lk(rd->impl->mx_);
+            rd->impl->ws_sessions_[rd->path].insert(session);
+        }
         rd->impl->ws_count_.fetch_add(1, std::memory_order_acq_rel);
         mg_set_user_connection_data(conn, session.get());
-        CV_LOG_INFO(kTag, "WS OPEN path="<<rd->path<<" remote="<<remote_string(ri)<<" session="<<ptr(session.get()));
+
+        CV_LOG_INFO(kTag, "WS OPEN path="<<rd->path<<" remote="<<remote_string(ri)<<" session="<<(const void*)session.get());
         char b[512]; _bc(b, "[WS READY] path='%s' sess=%p", rd->path.c_str(), (void*)session.get());
+
         session->on_open(rd->ws_h);
     }
+
     static int  wsData_(struct mg_connection* conn, int bits, char* data, size_t len, void* cbdata) {
         RouteData* rd = static_cast<RouteData*>(cbdata); if (!rd||!rd->impl) return 0;
         CivetWebSocketSession* sess = static_cast<CivetWebSocketSession*>(mg_get_user_connection_data(conn)); if (!sess) return 1;
