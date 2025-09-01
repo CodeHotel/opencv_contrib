@@ -36,6 +36,16 @@ namespace {
     cv::utils::logging::LogTag* kTag = &kStreamLogTag;
 }
 
+// ---- servlet-style endpoint (free function) ----
+static void servlet_endpoint(const cv::stream::Request& req, cv::stream::Response& res) {
+    CV_LOG_DEBUG(kTag, "HTTP servlet handler: method=" << req.getMethod()
+                             << " path=" << req.getPath());
+    static constexpr const char* kBody = "<!doctype html><html><body>servlet ok</body></html>\n";
+    res.setStatusCode(200);
+    res.setHeader("Content-Type", "text/html; charset=utf-8");
+    res.write(kBody, std::strlen(kBody));
+}
+
 // ----------------- helpers -----------------
 
 static inline bool parse_int(const uint8_t* data, size_t n, long long& out) {
@@ -130,6 +140,7 @@ static bool phase_http_server_and_test(
     CV_LOG_DEBUG(kTag, "Applying initial ServerConfig and registering HTTP endpoints...");
     server->setConfig(cfg_out);
 
+    // Register the existing lambda endpoints.
     for (const auto& kv : http_routes_and_bodies) {
         const std::string path = kv.first;
         const std::string body = kv.second;
@@ -143,6 +154,12 @@ static bool phase_http_server_and_test(
         });
     }
 
+    // NEW: Register a function-bound servlet endpoint to validate function binding works.
+    const std::string servletPath = "/servlet";
+    CV_LOG_DEBUG(kTag, "Register HTTP servlet endpoint at \"" << servletPath << "\" (free function)");
+    server->registerEndpoint(servletPath, &servlet_endpoint);
+
+    // Register WS echo endpoint.
     path_ws = "/ws";
     CV_LOG_DEBUG(kTag, "Register WebSocket echo endpoint at \"" << path_ws << "\"");
     cv::stream::WebSocketHandler wsEcho;
@@ -172,6 +189,7 @@ static bool phase_http_server_and_test(
     cst::HttpRequestOptions httpOpts;
     httpOpts.timeoutMs = 4000;
 
+    // Verify existing HTTP endpoints.
     CV_LOG_DEBUG(kTag, "Verifying registered HTTP endpoints (" << http_routes_and_bodies.size() << " routes) ...");
     for (const auto& kv : http_routes_and_bodies) {
         const std::string url = std::string("http://127.0.0.1:") + std::to_string(port_out) + kv.first;
@@ -184,6 +202,20 @@ static bool phase_http_server_and_test(
         }
     }
 
+    // Verify the function-bound servlet endpoint.
+    {
+        const std::string url = std::string("http://127.0.0.1:") + std::to_string(port_out) + servletPath;
+        auto resp = cst::httpGet(url, httpOpts);
+        CV_LOG_DEBUG(kTag, "HTTP GET (servlet) " << url << " -> status=" << resp.status << " body=\"" << resp.body << "\"");
+        const std::string expected = "<!doctype html><html><body>servlet ok</body></html>\n";
+        if (resp.status != 200 || resp.body != expected) {
+            CV_LOG_ERROR(kTag, "[FAIL] Servlet endpoint mismatch. Expected 200 & exact body; got code=" << resp.status
+                                 << " body=\"" << resp.body << "\"");
+            return false;
+        }
+    }
+
+    // Check unknown 404 still behaves.
     const std::string unknownUrl = std::string("http://127.0.0.1:") + std::to_string(port_out) + "/__no_such_endpoint__";
     auto nf = cst::httpGet(unknownUrl, httpOpts);
     CV_LOG_DEBUG(kTag, "HTTP GET (404 expected) " << unknownUrl << " -> status=" << nf.status << " body=\"" << nf.body << "\"");
@@ -196,6 +228,7 @@ static bool phase_http_server_and_test(
         return false;
     }
 
+    // Health-check after 404 using an existing route.
     {
         const std::string url = std::string("http://127.0.0.1:") + std::to_string(port_out) + http_routes_and_bodies[0].first;
         auto resp = cst::httpGet(url, httpOpts);
@@ -206,7 +239,7 @@ static bool phase_http_server_and_test(
         }
     }
 
-    CV_LOG_INFO(kTag, "[PASS] Phase 2: HTTP endpoints + 404 default page verified");
+    CV_LOG_INFO(kTag, "[PASS] Phase 2: HTTP endpoints (lambda + function-bound servlet) + 404 default page verified");
     return true;
 }
 
