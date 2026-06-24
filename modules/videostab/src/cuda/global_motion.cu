@@ -45,12 +45,18 @@
 #include <thrust/device_ptr.h>
 #include <thrust/remove.h>
 #include <thrust/functional.h>
+#include <thrust/tuple.h>
 #include "opencv2/core/cuda/common.hpp"
 
 namespace cv { namespace cuda { namespace device { namespace globmotion {
 
 __constant__ float cml[9];
 __constant__ float cmr[9];
+
+struct is_zero
+{
+    __host__ __device__ bool operator()(uchar x) const { return x == 0; }
+};
 
 int compactPoints(int N, float *points0, float *points1, const uchar *mask)
 {
@@ -60,7 +66,7 @@ int compactPoints(int N, float *points0, float *points1, const uchar *mask)
 
     return (int)(thrust::remove_if(thrust::make_zip_iterator(thrust::make_tuple(dpoints0, dpoints1)),
                              thrust::make_zip_iterator(thrust::make_tuple(dpoints0 + N, dpoints1 + N)),
-                             dmask, thrust::not1(thrust::identity<uchar>()))
+                             dmask, is_zero())
            - thrust::make_zip_iterator(make_tuple(dpoints0, dpoints1)));
 }
 
